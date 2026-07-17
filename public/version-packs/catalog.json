@@ -1,0 +1,119 @@
+{
+  "format": 1,
+  "versions": [
+    {
+      "id": "1.12.2",
+      "dataVersion": 1343,
+      "protocolVersion": 340,
+      "blockCount": 254,
+      "bytes": 42993
+    },
+    {
+      "id": "1.13.2",
+      "dataVersion": 1631,
+      "protocolVersion": 404,
+      "blockCount": 598,
+      "bytes": 142305
+    },
+    {
+      "id": "1.16.5",
+      "dataVersion": 2586,
+      "protocolVersion": 754,
+      "blockCount": 763,
+      "bytes": 190101
+    },
+    {
+      "id": "1.18.2",
+      "dataVersion": 2975,
+      "protocolVersion": 758,
+      "blockCount": 898,
+      "bytes": 225842
+    },
+    {
+      "id": "1.19.2",
+      "dataVersion": 3120,
+      "protocolVersion": 760,
+      "blockCount": 933,
+      "bytes": 236107
+    },
+    {
+      "id": "1.19.4",
+      "dataVersion": 3337,
+      "protocolVersion": 762,
+      "blockCount": 998,
+      "bytes": 256329
+    },
+    {
+      "id": "1.20.1",
+      "dataVersion": 3465,
+      "protocolVersion": 763,
+      "blockCount": 1003,
+      "bytes": 257744
+    },
+    {
+      "id": "1.20.4",
+      "dataVersion": 3700,
+      "protocolVersion": 765,
+      "blockCount": 1058,
+      "bytes": 275836
+    },
+    {
+      "id": "1.20.6",
+      "dataVersion": 3839,
+      "protocolVersion": 766,
+      "blockCount": 1060,
+      "bytes": 276434
+    },
+    {
+      "id": "1.21.1",
+      "dataVersion": 3955,
+      "protocolVersion": 767,
+      "blockCount": 1060,
+      "bytes": 276434
+    },
+    {
+      "id": "1.21.4",
+      "dataVersion": 4189,
+      "protocolVersion": 769,
+      "blockCount": 1095,
+      "bytes": 286435
+    },
+    {
+      "id": "1.21.8",
+      "dataVersion": 4440,
+      "protocolVersion": 772,
+      "blockCount": 1105,
+      "bytes": 288595
+    },
+    {
+      "id": "1.21.10",
+      "dataVersion": 4556,
+      "protocolVersion": 773,
+      "blockCount": 1166,
+      "bytes": 310074
+    },
+    {
+      "id": "1.21.11",
+      "dataVersion": 4671,
+      "protocolVersion": 774,
+      "blockCount": 1166,
+      "bytes": 310058
+    },
+    {
+      "id": "26.1.2",
+      "dataVersion": null,
+      "protocolVersion": null,
+      "blockCount": 0,
+      "bytes": 0,
+      "experimental": true
+    },
+    {
+      "id": "26.2",
+      "dataVersion": null,
+      "protocolVersion": null,
+      "blockCount": 0,
+      "bytes": 0,
+      "experimental": true
+    }
+  ]
+}
