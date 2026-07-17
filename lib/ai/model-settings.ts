@@ -11,6 +11,11 @@ export const providerKindSchema = z.enum([
 export const authModeSchema = z.enum(["bearer", "api-key", "x-api-key", "none"]);
 export const detailLevelSchema = z.enum(["concept", "balanced", "engineering"]);
 
+export const DEFAULT_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
+export const MAX_GENERATION_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 15_000;
+export const MAX_SCRIPT_TIMEOUT_MS = 60_000;
+
 const customHeadersSchema = z
   .record(z.string().min(1).max(80), z.string().max(2_000))
   .refine((headers) => Object.keys(headers).length <= 20, "自定义请求头最多 20 项");
@@ -30,7 +35,7 @@ export const modelSettingsSchema = z.object({
     topP: z.number().min(0).max(1).nullable(),
     maxOutputTokens: z.number().int().min(256).max(64_000),
     maxRetries: z.number().int().min(0).max(5),
-    timeoutMs: z.number().int().min(5_000).max(300_000),
+    timeoutMs: z.number().int().min(5_000).max(MAX_GENERATION_TIMEOUT_MS),
     maxSteps: z.number().int().min(1).max(8),
     seed: z.number().int().min(0).max(2_147_483_647).nullable(),
   }),
@@ -41,6 +46,7 @@ export const modelSettingsSchema = z.object({
     preserveExisting: z.boolean(),
     autoRunAfterGeneration: z.boolean(),
     maxBuildBlocks: z.number().int().min(1_000).max(500_000),
+    executionTimeoutMs: z.number().int().min(1_000).max(MAX_SCRIPT_TIMEOUT_MS),
     extraInstructions: z.string().max(4_000),
   }),
 });
@@ -234,7 +240,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
     topP: null,
     maxOutputTokens: 16_000,
     maxRetries: 2,
-    timeoutMs: 120_000,
+    timeoutMs: DEFAULT_GENERATION_TIMEOUT_MS,
     maxSteps: 4,
     seed: null,
   },
@@ -245,12 +251,14 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
     preserveExisting: true,
     autoRunAfterGeneration: true,
     maxBuildBlocks: 200_000,
+    executionTimeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
     extraInstructions: "",
   },
 };
 
 const PREFERENCES_KEY = "forgescript:model-settings:v1";
 const SECRET_KEY = "forgescript:model-api-key:v1";
+const LEGACY_DEFAULT_GENERATION_TIMEOUT_MS = 120_000;
 
 export function getProviderPreset(id: string) {
   return PROVIDER_PRESETS.find((preset) => preset.presetId === id) ?? PROVIDER_PRESETS[0];
@@ -267,11 +275,15 @@ export function loadModelSettings(): ModelSettings {
     const saved = window.localStorage.getItem(PREFERENCES_KEY);
     const parsed = saved ? JSON.parse(saved) : {};
     const secret = window.sessionStorage.getItem(SECRET_KEY) ?? "";
+    const generation = { ...DEFAULT_MODEL_SETTINGS.generation, ...parsed.generation };
+    if (generation.timeoutMs === LEGACY_DEFAULT_GENERATION_TIMEOUT_MS) {
+      generation.timeoutMs = DEFAULT_GENERATION_TIMEOUT_MS;
+    }
     const candidate = {
       ...DEFAULT_MODEL_SETTINGS,
       ...parsed,
       apiKey: secret,
-      generation: { ...DEFAULT_MODEL_SETTINGS.generation, ...parsed.generation },
+      generation,
       builder: { ...DEFAULT_MODEL_SETTINGS.builder, ...parsed.builder },
     };
     const validated = modelSettingsSchema.safeParse(candidate);

@@ -18,6 +18,8 @@ import {
   X,
 } from "lucide-react";
 import {
+  MAX_GENERATION_TIMEOUT_MS,
+  MAX_SCRIPT_TIMEOUT_MS,
   getProviderPreset,
   modelSettingsSchema,
   PROVIDER_PRESETS,
@@ -308,8 +310,8 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                     <Field label="失败重试次数" hint="不含模型主动工具调用">
                       <input type="number" min="0" max="5" value={draft.generation.maxRetries} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxRetries: Number(event.target.value) } }))} />
                     </Field>
-                    <Field label="请求超时（秒）" hint="复杂结构建议 60–180 秒">
-                      <input type="number" min="5" max="300" value={Math.round(draft.generation.timeoutMs / 1000)} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, timeoutMs: Number(event.target.value) * 1000 } }))} />
+                    <Field label="AI 总超时（分钟）" hint="默认 30 分钟；深度思考或大型结构可提高到 60–120 分钟">
+                      <input type="number" min="1" max={MAX_GENERATION_TIMEOUT_MS / 60_000} value={Math.round(draft.generation.timeoutMs / 60_000)} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, timeoutMs: Number(event.target.value) * 60_000 } }))} />
                     </Field>
                     <Field label="随机种子" hint="可选；仅在供应商支持时生效">
                       <div className="optional-number">
@@ -339,6 +341,9 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                   </div>
                   <Field label="最大结构方块数" hint="同时作为模型约束；实际执行仍受沙箱硬限制">
                     <input type="number" min="1000" max="500000" step="1000" value={draft.builder.maxBuildBlocks} onChange={(event) => setDraft((current) => ({ ...current, builder: { ...current.builder, maxBuildBlocks: Number(event.target.value) } }))} />
+                  </Field>
+                  <Field label="建筑脚本执行超时（秒）" hint="默认 15 秒；复杂几何可提高到 60 秒，无限循环仍会被安全中断">
+                    <input type="number" min="1" max={MAX_SCRIPT_TIMEOUT_MS / 1_000} value={Math.round(draft.builder.executionTimeoutMs / 1_000)} onChange={(event) => setDraft((current) => ({ ...current, builder: { ...current.builder, executionTimeoutMs: Number(event.target.value) * 1_000 } }))} />
                   </Field>
                   <Field label="额外系统偏好" hint={`${draft.builder.extraInstructions.length}/4000 · 会作为建筑偏好加入系统指令`}>
                     <textarea rows={5} maxLength={4000} value={draft.builder.extraInstructions} onChange={(event) => setDraft((current) => ({ ...current, builder: { ...current.builder, extraInstructions: event.target.value } }))} placeholder="例如：优先使用生存模式容易获取的材料；所有维护通道至少 2 格高。" />

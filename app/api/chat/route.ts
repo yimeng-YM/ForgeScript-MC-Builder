@@ -128,7 +128,8 @@ export async function POST(request: Request) {
     topP: settings.generation.topP ?? undefined,
     maxOutputTokens: settings.generation.maxOutputTokens,
     maxRetries: settings.generation.maxRetries,
-    timeout: settings.generation.timeoutMs,
+    timeout: { totalMs: settings.generation.timeoutMs },
+    abortSignal: request.signal,
     seed: settings.generation.seed ?? undefined,
     tools: {
       commit_source: {

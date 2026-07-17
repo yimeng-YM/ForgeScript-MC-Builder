@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import {
@@ -131,6 +131,7 @@ export function BuilderWorkbench() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(DEFAULT_MODEL_SETTINGS);
   const [notice, setNotice] = useState("正在载入版本化方块注册表…");
+  const executionTimeoutRef = useRef(DEFAULT_MODEL_SETTINGS.builder.executionTimeoutMs);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
   const maxY = useMemo(
@@ -141,11 +142,13 @@ export function BuilderWorkbench() {
   const warnings = diagnostics.filter((item) => item.severity === "warning").length;
   const chatTransport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
 
-  const runWith = async (nextSource: string, nextPack: VersionPack) => {
+  const runWith = useCallback(async (nextSource: string, nextPack: VersionPack) => {
     setRunning(true);
     setNotice("QuickJS 沙箱正在执行建筑脚本…");
     try {
-      const nextWorld = await executeBuilderSource(nextSource);
+      const nextWorld = await executeBuilderSource(nextSource, {
+        timeoutMs: executionTimeoutRef.current,
+      });
       const nextDiagnostics = validateWorld(nextWorld, nextPack);
       setWorld(nextWorld);
       setDiagnostics(nextDiagnostics);
@@ -170,10 +173,14 @@ export function BuilderWorkbench() {
     } finally {
       setRunning(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => setModelSettings(loadModelSettings()));
+    const frame = window.requestAnimationFrame(() => {
+      const settings = loadModelSettings();
+      executionTimeoutRef.current = settings.builder.executionTimeoutMs;
+      setModelSettings(settings);
+    });
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
@@ -194,7 +201,7 @@ export function BuilderWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [runWith]);
 
   const { messages, sendMessage, status: chatStatus, error: chatError } = useChat({
     transport: chatTransport,
@@ -244,6 +251,7 @@ export function BuilderWorkbench() {
   };
 
   const updateModelSettings = (settings: ModelSettings) => {
+    executionTimeoutRef.current = settings.builder.executionTimeoutMs;
     setModelSettings(settings);
     saveModelSettings(settings);
     setNotice(`模型设置已更新 · ${providerLabel(settings)} · ${settings.model}`);

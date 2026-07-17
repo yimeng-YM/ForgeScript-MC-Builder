@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import test from "node:test";
 import {
+  DEFAULT_GENERATION_TIMEOUT_MS,
   DEFAULT_MODEL_SETTINGS,
+  MAX_GENERATION_TIMEOUT_MS,
   modelSettingsSchema,
   PROVIDER_PRESETS,
 } from "../lib/ai/model-settings.ts";
@@ -30,6 +32,28 @@ test("ships validated model provider presets and safe generation defaults", () =
   assert.equal(DEFAULT_MODEL_SETTINGS.builder.redstonePrecision, true);
   assert.equal(DEFAULT_MODEL_SETTINGS.builder.strictBlockStates, true);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxOutputTokens, 16_000);
+  assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, 30 * 60 * 1_000);
+  assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, DEFAULT_GENERATION_TIMEOUT_MS);
+  assert.equal(
+    modelSettingsSchema.safeParse({
+      ...DEFAULT_MODEL_SETTINGS,
+      generation: {
+        ...DEFAULT_MODEL_SETTINGS.generation,
+        timeoutMs: MAX_GENERATION_TIMEOUT_MS,
+      },
+    }).success,
+    true,
+  );
+  assert.equal(
+    modelSettingsSchema.safeParse({
+      ...DEFAULT_MODEL_SETTINGS,
+      generation: {
+        ...DEFAULT_MODEL_SETTINGS.generation,
+        timeoutMs: MAX_GENERATION_TIMEOUT_MS + 1,
+      },
+    }).success,
+    false,
+  );
 });
 
 test("executes generated JavaScript inside the controlled Building SDK", async () => {
@@ -39,6 +63,13 @@ test("executes generated JavaScript inside the controlled Building SDK", async (
   assert.deepEqual(
     validateWorld(world, pack).filter((diagnostic) => diagnostic.severity === "error"),
     [],
+  );
+});
+
+test("safely interrupts runaway building scripts at the configured deadline", async () => {
+  await assert.rejects(
+    executeBuilderSource("while (true) {}", { timeoutMs: 1_000 }),
+    /建筑脚本执行超过 1 秒/,
   );
 });
 

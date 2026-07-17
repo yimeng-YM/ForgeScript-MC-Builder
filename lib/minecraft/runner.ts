@@ -132,14 +132,28 @@ function describeQuickJSError(value: unknown): string {
   return String(value);
 }
 
-export async function executeBuilderSource(source: string): Promise<WorldDocument> {
+export type BuilderExecutionOptions = {
+  timeoutMs?: number;
+};
+
+const DEFAULT_EXECUTION_TIMEOUT_MS = 15_000;
+const MAX_EXECUTION_TIMEOUT_MS = 60_000;
+
+export async function executeBuilderSource(
+  source: string,
+  options: BuilderExecutionOptions = {},
+): Promise<WorldDocument> {
   const { getQuickJS } = await import("quickjs-emscripten");
   const QuickJS = await getQuickJS();
   const runtime = QuickJS.newRuntime();
+  const timeoutMs = Math.min(
+    MAX_EXECUTION_TIMEOUT_MS,
+    Math.max(1_000, options.timeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS),
+  );
   const startedAt = performance.now();
   runtime.setMemoryLimit(64 * 1024 * 1024);
   runtime.setMaxStackSize(2 * 1024 * 1024);
-  runtime.setInterruptHandler(() => performance.now() - startedAt > 1_500);
+  runtime.setInterruptHandler(() => performance.now() - startedAt > timeoutMs);
   const context = runtime.newContext();
 
   try {
@@ -147,7 +161,11 @@ export async function executeBuilderSource(source: string): Promise<WorldDocumen
     if (result.error) {
       const error = context.dump(result.error);
       result.error.dispose();
-      throw new Error(describeQuickJSError(error));
+      const message = describeQuickJSError(error);
+      if (/interrupted/i.test(message)) {
+        throw new Error(`建筑脚本执行超过 ${(timeoutMs / 1_000).toFixed(0)} 秒，已安全中断`);
+      }
+      throw new Error(message);
     }
     const serialized = context.dump(result.value);
     result.value.dispose();
@@ -165,4 +183,3 @@ export async function executeBuilderSource(source: string): Promise<WorldDocumen
     runtime.dispose();
   }
 }
-
