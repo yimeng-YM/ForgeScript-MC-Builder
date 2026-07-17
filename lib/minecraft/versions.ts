@@ -5,6 +5,7 @@ import type {
   WorldDocument,
   WorldStats,
 } from "./types";
+import { CARDINAL_DIRECTIONS, resolveRedstoneConnections } from "./redstone.ts";
 
 export const VERSION_OPTIONS: VersionCatalogEntry[] = [
   { id: "1.12.2", dataVersion: 1343, protocolVersion: 340, blockCount: 254, bytes: 42993 },
@@ -46,8 +47,9 @@ export async function loadVersionPack(version: string): Promise<VersionPack> {
 export function validateWorld(world: WorldDocument, pack: VersionPack): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const registry = new Map(pack.blocks.map((block) => [block.id, block]));
+  const resolvedRedstone = resolveRedstoneConnections(world);
 
-  for (const placed of world.blocks) {
+  for (const [blockIndex, placed] of world.blocks.entries()) {
     const schema = registry.get(placed.state.id);
     const location = {
       region: placed.region,
@@ -84,6 +86,43 @@ export function validateWorld(world: WorldDocument, pack: VersionPack): Diagnost
           code: "INVALID_PROPERTY_VALUE",
           message: `${placed.state.id}[${name}=${value}] 非法；可用值：${property.values.join(", ")}`,
           block: location,
+        });
+      }
+    }
+
+    if (placed.state.id === "minecraft:redstone_wire") {
+      const schemaPropertyNames = new Set(schema.properties.map((property) => property.name));
+      const requiredProperties = [...CARDINAL_DIRECTIONS, "power"].filter((name) =>
+        schemaPropertyNames.has(name),
+      );
+      const missingProperties = requiredProperties.filter(
+        (name) => placed.state.properties[name] === undefined,
+      );
+      if (missingProperties.length > 0) {
+        diagnostics.push({
+          severity: "error",
+          stage: "redstone",
+          code: "INCOMPLETE_REDSTONE_WIRE_STATE",
+          message: `${placed.state.id} is missing ${missingProperties.join(", ")}`,
+          block: location,
+          suggestion: "Use redstone.wire(power); the runtime will resolve all four connections.",
+        });
+      }
+
+      const resolvedProperties = resolvedRedstone.blocks[blockIndex]?.state.properties;
+      const mismatchedDirections = CARDINAL_DIRECTIONS.filter(
+        (direction) =>
+          schemaPropertyNames.has(direction) &&
+          placed.state.properties[direction] !== resolvedProperties?.[direction],
+      );
+      if (mismatchedDirections.length > 0) {
+        diagnostics.push({
+          severity: "warning",
+          stage: "redstone",
+          code: "REDSTONE_WIRE_TOPOLOGY_MISMATCH",
+          message: `Redstone wire connections do not match neighbors: ${mismatchedDirections.join(", ")}`,
+          block: location,
+          suggestion: "Run the structure through the Building SDK connection resolver before export.",
         });
       }
     }
@@ -156,4 +195,3 @@ export function getWorldStats(world: WorldDocument): WorldStats {
       .sort((a, b) => b.count - a.count),
   };
 }
-

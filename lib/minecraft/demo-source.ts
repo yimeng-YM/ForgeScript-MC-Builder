@@ -6,23 +6,17 @@ function redstoneSource(version: string) {
   version: ${quote(version)},
   author: "LLM MC Builder",
   description: "显式保存朝向、延迟与供电状态的演示结构"
-}, ({ world, block }) => {
+}, ({ world, block, redstone }) => {
   const main = world.region("main", { origin: [0, 0, 0] });
   const base = block("minecraft:smooth_stone");
-  const dust = block("minecraft:redstone_wire", {
-    north: "none", east: "side", south: "none", west: "side", power: "0"
-  });
+  const dust = redstone.wire(0);
 
   main.fill([0, 0, 0], [12, 0, 4], base);
   main.set([1, 1, 2], block("minecraft:lever", { face: "floor", facing: "east", powered: "false" }));
   main.set([2, 1, 2], dust);
-  main.set([3, 1, 2], block("minecraft:repeater", {
-    facing: "east", delay: "2", locked: "false", powered: "false"
-  }));
+  main.set([3, 1, 2], redstone.repeater("east", { delay: 2 }));
   main.line([4, 1, 2], [6, 1, 2], dust);
-  main.set([7, 1, 2], block("minecraft:comparator", {
-    facing: "east", mode: "compare", powered: "false"
-  }));
+  main.set([7, 1, 2], redstone.comparator("east", { mode: "compare" }));
   main.line([8, 1, 2], [10, 1, 2], dust);
   main.set([11, 1, 2], block("minecraft:redstone_lamp", { lit: "false" }));
 });`;
@@ -97,4 +91,3 @@ export function sourceForPrompt(prompt: string, version: string): string {
 }
 
 export const DEFAULT_SOURCE = houseSource("1.21.11");
-

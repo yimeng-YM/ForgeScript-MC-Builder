@@ -85,6 +85,14 @@ function builderInstructions(version: string, source: string | undefined, settin
   const editRule = settings.builder.preserveExisting
     ? "保留与需求无关的现有源码，只做满足本轮要求所需的最小修改。"
     : "可以重构或重建现有源码，以当前需求的整体质量为优先。";
+  const redstoneSemantics = [
+    "CRITICAL JAVA REDSTONE SEMANTICS:",
+    "redstone wire topology is resolved automatically from final neighboring blocks; create dust with redstone.wire(power).",
+    "For repeaters and comparators, the Java block-state `facing` points from OUTPUT toward INPUT, so signal travel is the opposite direction.",
+    "Always prefer redstone.repeater(signalDirection, { delay, locked, powered }) and redstone.comparator(signalDirection, { mode, powered }); these helpers accept the SIGNAL TRAVEL direction and write the opposite facing value.",
+    "Example: a signal travelling east (+X) requires facing=west, so use redstone.repeater(\"east\", { delay: 2 }).",
+    "The build callback API is ({ world, block, redstone }).",
+  ].join(" ");
   const extra = settings.builder.extraInstructions.trim()
     ? `\n用户的额外生成偏好：\n${settings.builder.extraInstructions.trim()}`
     : "";
@@ -94,9 +102,10 @@ function builderInstructions(version: string, source: string | undefined, settin
 坐标约定为 X 东、Y 上、Z 南。${detailInstruction(settings)}
 ${stateRule}
 ${redstoneRule}
+${redstoneSemantics}
 ${editRule}
 结构不得超过 ${settings.builder.maxBuildBlocks.toLocaleString("en-US")} 个方块。
-可用 API：mc.build(metadata, ({ world, block }) => { const region = world.region(name, {origin}); region.set/fill/hollowBox/walls/line/pillar/replace(...) })。
+可用 API：mc.build(metadata, ({ world, block, redstone }) => { const region = world.region(name, {origin}); region.set/fill/hollowBox/walls/line/pillar/replace(...) })。
 完成后必须调用 commit_source 提交完整 JavaScript；聊天正文只简要说明结果、精度假设和需要用户注意的限制，不粘贴源码。
 当前源码如下：
 ${source ?? "// empty project"}${extra}`;

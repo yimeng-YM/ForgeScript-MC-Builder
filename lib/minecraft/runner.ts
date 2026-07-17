@@ -1,4 +1,5 @@
 import type { WorldDocument } from "./types";
+import { resolveRedstoneConnections } from "./redstone.ts";
 
 const SDK_BOOTSTRAP = String.raw`
 (() => {
@@ -112,14 +113,72 @@ const SDK_BOOTSTRAP = String.raw`
 
   const world = Object.freeze({ region: makeRegion });
   const block = (id, properties = {}, nbt) => Object.freeze({ id, properties, nbt });
+  const cardinalDirections = ["north", "east", "south", "west"];
+  const oppositeDirections = Object.freeze({ north: "south", east: "west", south: "north", west: "east" });
+  const cardinal = (value, label) => {
+    if (!cardinalDirections.includes(value)) throw new TypeError(label + " must be north, east, south, or west");
+    return value;
+  };
+  const facingForSignal = (signalDirection) => oppositeDirections[cardinal(signalDirection, "signalDirection")];
+  const booleanProperty = (value, label) => {
+    if (value === true || value === "true") return "true";
+    if (value === false || value === "false" || value === undefined) return "false";
+    throw new TypeError(label + " must be true or false");
+  };
+  const modernRedstoneStates = () => {
+    const match = /^(\d+)\.(\d+)/.exec(String(metadata.version));
+    return !match || Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 13);
+  };
+  const redstone = Object.freeze({
+    facingForSignal,
+    signalDirection(facing) {
+      return oppositeDirections[cardinal(facing, "facing")];
+    },
+    wire(power = 0) {
+      integer(power, "power");
+      if (power < 0 || power > 15) throw new RangeError("power must be between 0 and 15");
+      if (!modernRedstoneStates()) return block("minecraft:redstone_wire");
+      return block("minecraft:redstone_wire", {
+        north: "none", east: "none", south: "none", west: "none", power: String(power)
+      });
+    },
+    repeater(signalDirection, options = {}) {
+      const delay = options.delay === undefined ? 1 : options.delay;
+      integer(delay, "delay");
+      if (delay < 1 || delay > 4) throw new RangeError("delay must be between 1 and 4");
+      const powered = booleanProperty(options.powered, "powered");
+      if (!modernRedstoneStates()) {
+        return block(powered === "true" ? "minecraft:powered_repeater" : "minecraft:unpowered_repeater");
+      }
+      return block("minecraft:repeater", {
+        facing: facingForSignal(signalDirection),
+        delay: String(delay),
+        locked: booleanProperty(options.locked, "locked"),
+        powered
+      });
+    },
+    comparator(signalDirection, options = {}) {
+      const mode = options.mode === undefined ? "compare" : options.mode;
+      if (mode !== "compare" && mode !== "subtract") throw new TypeError("mode must be compare or subtract");
+      const powered = booleanProperty(options.powered, "powered");
+      if (!modernRedstoneStates()) {
+        return block(powered === "true" ? "minecraft:powered_comparator" : "minecraft:unpowered_comparator");
+      }
+      return block("minecraft:comparator", {
+        facing: facingForSignal(signalDirection),
+        mode,
+        powered
+      });
+    }
+  });
   const build = (nextMetadata, callback) => {
     if (!nextMetadata || typeof nextMetadata !== "object") throw new TypeError("mc.build requires metadata");
     metadata = { ...metadata, ...nextMetadata };
     if (typeof callback !== "function") throw new TypeError("mc.build requires a callback");
-    callback(Object.freeze({ world, block }));
+    callback(Object.freeze({ world, block, redstone }));
   };
 
-  globalThis.mc = Object.freeze({ build, block });
+  globalThis.mc = Object.freeze({ build, block, redstone });
   globalThis.__collectBuild = () => JSON.stringify({ ...metadata, blocks: Array.from(placed.values()) });
 })();
 `;
@@ -171,13 +230,13 @@ export async function executeBuilderSource(
     result.value.dispose();
     if (typeof serialized !== "string") throw new Error("Building SDK did not return serialized world data");
     const parsed = JSON.parse(serialized) as WorldDocument;
-    return {
+    return resolveRedstoneConnections({
       name: parsed.name || "Untitled build",
       version: parsed.version || "1.21.11",
       author: parsed.author || "LLM MC Builder",
       description: parsed.description || "",
       blocks: parsed.blocks ?? [],
-    };
+    });
   } finally {
     context.dispose();
     runtime.dispose();

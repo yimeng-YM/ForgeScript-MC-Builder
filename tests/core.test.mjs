@@ -11,6 +11,7 @@ import {
 } from "../lib/ai/model-settings.ts";
 import { DEFAULT_SOURCE, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
+import { redstoneSignalDirection } from "../lib/minecraft/redstone.ts";
 import { executeBuilderSource } from "../lib/minecraft/runner.ts";
 import { validateWorld } from "../lib/minecraft/versions.ts";
 
@@ -74,11 +75,67 @@ test("safely interrupts runaway building scripts at the configured deadline", as
 });
 
 test("preserves redstone direction and state properties", async () => {
-  const world = await executeBuilderSource(sourceForPrompt("生成红石延迟链", "1.21.11"));
+  const world = await executeBuilderSource(sourceForPrompt("repeater comparator delay circuit", "1.21.11"));
   const repeater = world.blocks.find((block) => block.state.id === "minecraft:repeater");
-  assert.equal(repeater?.state.properties.facing, "east");
+  const comparator = world.blocks.find((block) => block.state.id === "minecraft:comparator");
+  const wire = world.blocks.find(
+    (block) => block.state.id === "minecraft:redstone_wire" && block.x === 4,
+  );
+  assert.equal(repeater?.state.properties.facing, "west");
+  assert.equal(redstoneSignalDirection(repeater?.state.properties.facing), "east");
   assert.equal(repeater?.state.properties.delay, "2");
   assert.equal(repeater?.state.properties.locked, "false");
+  assert.equal(comparator?.state.properties.facing, "west");
+  assert.equal(redstoneSignalDirection(comparator?.state.properties.facing), "east");
+  assert.deepEqual(wire?.state.properties, {
+    north: "none",
+    east: "side",
+    south: "none",
+    west: "side",
+    power: "0",
+  });
+  assert.deepEqual(
+    validateWorld(world, pack).filter((diagnostic) => diagnostic.severity === "error"),
+    [],
+  );
+  assert.equal(
+    validateWorld(world, pack).some(
+      (diagnostic) => diagnostic.code === "REDSTONE_WIRE_TOPOLOGY_MISMATCH",
+    ),
+    false,
+  );
+});
+
+test("resolves redstone wire straight lines, corners, and vertical climbs", async () => {
+  const source = `mc.build({ name: "topology", version: "1.21.11" }, ({ world, block, redstone }) => {
+    const main = world.region("main");
+    const wire = redstone.wire(0);
+    main.set([0, 0, 0], wire);
+    main.set([1, 0, 0], wire);
+    main.set([1, 0, 1], wire);
+    main.set([3, 0, 0], wire);
+    main.set([4, 0, 0], block("minecraft:stone"));
+    main.set([4, 1, 0], wire);
+  });`;
+  const world = await executeBuilderSource(source);
+  const at = (x, y, z) =>
+    world.blocks.find((block) => block.x === x && block.y === y && block.z === z)?.state.properties;
+
+  assert.deepEqual(at(0, 0, 0), {
+    north: "none", east: "side", south: "none", west: "side", power: "0",
+  });
+  assert.deepEqual(at(1, 0, 0), {
+    north: "none", east: "none", south: "side", west: "side", power: "0",
+  });
+  assert.deepEqual(at(1, 0, 1), {
+    north: "side", east: "none", south: "side", west: "none", power: "0",
+  });
+  assert.deepEqual(at(3, 0, 0), {
+    north: "none", east: "up", south: "none", west: "side", power: "0",
+  });
+  assert.deepEqual(at(4, 1, 0), {
+    north: "none", east: "side", south: "none", west: "side", power: "0",
+  });
 });
 
 test("encodes a gzip-compressed modern Litematic NBT payload", async () => {
