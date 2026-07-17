@@ -2,26 +2,40 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+async function fetchWorker(path = "/", init) {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
   return worker.fetch(
-    new Request("http://localhost/", { headers: { accept: "text/html" } }),
+    new Request(`http://localhost${path}`, init ?? { headers: { accept: "text/html" } }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
   );
 }
 
 test("server-renders the ForgeScript workbench shell", async () => {
-  const response = await render();
+  const response = await fetchWorker();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /ForgeScript/);
   assert.match(html, /Minecraft AI 建筑工作台/);
   assert.match(html, /与建筑 AI 对话/);
+  assert.match(html, /打开模型与生成设置/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("tests the default model connection without exposing a secret", async () => {
+  const response = await fetchWorker("/api/models/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.ok, true);
+  assert.equal(result.mode, "local");
+  assert.doesNotMatch(JSON.stringify(result), /apiKey|AI_GATEWAY_API_KEY/);
 });
 
 test("ships generated multi-version profile packs", async () => {
@@ -31,4 +45,3 @@ test("ships generated multi-version profile packs", async () => {
   assert.ok(catalog.versions.find((entry) => entry.id === "1.21.11")?.blockCount > 1000);
   assert.equal(catalog.versions.find((entry) => entry.id === "26.2")?.experimental, true);
 });
-

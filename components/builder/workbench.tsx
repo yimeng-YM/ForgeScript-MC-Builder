@@ -21,6 +21,7 @@ import {
   Play,
   Redo2,
   Send,
+  Settings2,
   Sparkles,
   Undo2,
   WandSparkles,
@@ -38,6 +39,14 @@ import {
 } from "@/components/ai-elements/message";
 import { Tool, ToolContent, ToolHeader } from "@/components/ai-elements/tool";
 import { Viewport3D } from "./viewport-3d";
+import { ModelSettingsDialog } from "./model-settings-dialog";
+import {
+  DEFAULT_MODEL_SETTINGS,
+  loadModelSettings,
+  providerLabel,
+  saveModelSettings,
+  type ModelSettings,
+} from "@/lib/ai/model-settings";
 import { DEFAULT_SOURCE } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
 import { executeBuilderSource } from "@/lib/minecraft/runner";
@@ -119,6 +128,8 @@ export function BuilderWorkbench() {
   const [redstoneOnly, setRedstoneOnly] = useState(false);
   const [layer, setLayer] = useState<number | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelSettings, setModelSettings] = useState<ModelSettings>(DEFAULT_MODEL_SETTINGS);
   const [notice, setNotice] = useState("正在载入版本化方块注册表…");
 
   const stats = useMemo(() => getWorldStats(world), [world]);
@@ -128,6 +139,7 @@ export function BuilderWorkbench() {
   );
   const blockingErrors = diagnostics.filter((item) => item.severity === "error").length;
   const warnings = diagnostics.filter((item) => item.severity === "warning").length;
+  const chatTransport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
 
   const runWith = async (nextSource: string, nextPack: VersionPack) => {
     setRunning(true);
@@ -161,6 +173,11 @@ export function BuilderWorkbench() {
   };
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setModelSettings(loadModelSettings()));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     loadVersionPack("1.21.11")
       .then(async (loaded) => {
@@ -180,13 +197,13 @@ export function BuilderWorkbench() {
   }, []);
 
   const { messages, sendMessage, status: chatStatus, error: chatError } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: chatTransport,
     onFinish: ({ message }) => {
       const nextSource = committedSource(message);
       if (!nextSource) return;
       setSource(nextSource);
       setActiveTab("preview");
-      if (pack) void runWith(nextSource, pack);
+      if (pack && modelSettings.builder.autoRunAfterGeneration) void runWith(nextSource, pack);
     },
   });
 
@@ -223,7 +240,13 @@ export function BuilderWorkbench() {
     const text = value.trim();
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setPrompt("");
-    await sendMessage({ text }, { body: { version, source } });
+    await sendMessage({ text }, { body: { version, source, settings: modelSettings } });
+  };
+
+  const updateModelSettings = (settings: ModelSettings) => {
+    setModelSettings(settings);
+    saveModelSettings(settings);
+    setNotice(`模型设置已更新 · ${providerLabel(settings)} · ${settings.model}`);
   };
 
   const exportLitematic = async () => {
@@ -249,6 +272,12 @@ export function BuilderWorkbench() {
 
   return (
     <main className="builder-shell">
+      <ModelSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        value={modelSettings}
+        onSave={updateModelSettings}
+      />
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-cube" aria-hidden="true"><span /></div>
@@ -286,6 +315,7 @@ export function BuilderWorkbench() {
         </div>
 
         <div className="top-actions">
+          <button className="icon-button model-settings-trigger" onClick={() => setSettingsOpen(true)} title="模型与生成设置" aria-label="打开模型与生成设置"><Settings2 size={16} /></button>
           <button className="icon-button" disabled title="撤销即将加入历史层"><Undo2 size={16} /></button>
           <button className="icon-button" disabled title="重做即将加入历史层"><Redo2 size={16} /></button>
           <button className="run-button" disabled={!pack || running} onClick={() => pack && void runWith(source, pack)}>
@@ -306,7 +336,9 @@ export function BuilderWorkbench() {
               <span className="eyebrow">ARCHITECT</span>
               <h1>与建筑 AI 对话</h1>
             </div>
-            <span className="model-badge"><Sparkles size={12} /> AUTO</span>
+            <button className="model-badge" onClick={() => setSettingsOpen(true)} title={`${modelSettings.model} · 点击配置`}>
+              <span className="model-status-dot" /><Sparkles size={12} /> {providerLabel(modelSettings)}
+            </button>
           </div>
 
           <Conversation className="conversation">
