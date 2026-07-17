@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 async function fetchWorker(path = "/", init) {
@@ -22,7 +23,19 @@ test("server-renders the ForgeScript workbench shell", async () => {
   assert.match(html, /Minecraft AI 建筑工作台/);
   assert.match(html, /与建筑 AI 对话/);
   assert.match(html, /打开模型与生成设置/);
+  assert.match(html, /rel="icon"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("the 3D viewport owns and releases one WebGL renderer", async () => {
+  const source = await readFile(
+    path.join(process.cwd(), "components", "builder", "viewport-3d.tsx"),
+    "utf8",
+  );
+
+  assert.equal(source.match(/new THREE\.WebGLRenderer/g)?.length, 1);
+  assert.match(source, /renderer\.forceContextLoss\(\)/);
+  assert.doesNotMatch(source, /PCFSoftShadowMap/);
 });
 
 test("tests the default model connection without exposing a secret", async () => {
