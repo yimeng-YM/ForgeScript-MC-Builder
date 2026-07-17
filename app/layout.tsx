@@ -17,16 +17,23 @@ export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const imageUrl = `${protocol}://${host}/og.png`;
+  const baseUrl = `${protocol}://${host}`;
+  const imageUrl = `${baseUrl}/og.png`;
+  const faviconUrl = `${baseUrl}/forgescript-favicon-32.png`;
+  const appIconUrl = `${baseUrl}/forgescript-icon-512.png`;
+  const appleIconUrl = `${baseUrl}/forgescript-apple-touch-icon.png`;
   const title = "ForgeScript — Minecraft AI 建筑工作台";
   const description = "通过大模型生成受控 JavaScript，预览、校验并导出多版本 Minecraft Litematic 结构。";
   return {
     title,
     description,
     icons: {
-      icon: [{ url: imageUrl, type: "image/png" }],
-      shortcut: imageUrl,
-      apple: imageUrl,
+      icon: [
+        { url: faviconUrl, type: "image/png", sizes: "32x32" },
+        { url: appIconUrl, type: "image/png", sizes: "512x512" },
+      ],
+      shortcut: faviconUrl,
+      apple: [{ url: appleIconUrl, type: "image/png", sizes: "180x180" }],
     },
     openGraph: {
       title,

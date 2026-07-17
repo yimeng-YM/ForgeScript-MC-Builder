@@ -24,6 +24,9 @@ test("server-renders the ForgeScript workbench shell", async () => {
   assert.match(html, /与建筑 AI 对话/);
   assert.match(html, /打开模型与生成设置/);
   assert.match(html, /rel="icon"/);
+  assert.match(html, /forgescript-favicon-32\.png/);
+  assert.match(html, /forgescript-icon-512\.png/);
+  assert.doesNotMatch(html, /rel="icon"[^>]+og\.png/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
