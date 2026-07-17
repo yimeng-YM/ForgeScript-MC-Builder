@@ -1,5 +1,16 @@
 const quote = (value: string) => JSON.stringify(value);
 
+function emptySource(version: string) {
+  return `mc.build({
+  name: "空白项目",
+  version: ${quote(version)},
+  author: "LLM MC Builder",
+  description: "等待通过对话或源码生成结构"
+}, () => {
+  // 从空白结构开始；在这里添加方块或通过左侧对话生成。
+});`;
+}
+
 function redstoneSource(version: string) {
   return `mc.build({
   name: "可调延迟红石脉冲链",
@@ -90,4 +101,4 @@ export function sourceForPrompt(prompt: string, version: string): string {
   return houseSource(version);
 }
 
-export const DEFAULT_SOURCE = houseSource("1.21.11");
+export const DEFAULT_SOURCE = emptySource("1.21.11");

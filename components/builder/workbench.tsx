@@ -17,6 +17,7 @@ import {
   FileCode2,
   Layers3,
   LoaderCircle,
+  MessageSquarePlus,
   PanelRight,
   Play,
   Redo2,
@@ -66,7 +67,7 @@ import {
 type WorkspaceTab = "preview" | "source" | "diagnostics";
 
 const EMPTY_WORLD: WorldDocument = {
-  name: "未运行的项目",
+  name: "空白项目",
   version: "1.21.11",
   author: "LLM MC Builder",
   description: "",
@@ -187,11 +188,11 @@ export function BuilderWorkbench() {
   useEffect(() => {
     let cancelled = false;
     loadVersionPack("1.21.11")
-      .then(async (loaded) => {
+      .then((loaded) => {
         if (cancelled) return;
         setPack(loaded);
         setPackStatus("ready");
-        await runWith(DEFAULT_SOURCE, loaded);
+        setNotice(`空白项目已就绪 · ${loaded.blockCount.toLocaleString()} 个版本方块可用`);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -203,7 +204,14 @@ export function BuilderWorkbench() {
     };
   }, [runWith]);
 
-  const { messages, sendMessage, status: chatStatus, error: chatError } = useChat({
+  const {
+    messages,
+    sendMessage,
+    setMessages,
+    stop,
+    status: chatStatus,
+    error: chatError,
+  } = useChat({
     transport: chatTransport,
     onFinish: ({ message }) => {
       const nextSource = committedSource(message);
@@ -248,6 +256,13 @@ export function BuilderWorkbench() {
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setPrompt("");
     await sendMessage({ text }, { body: { version, source, settings: modelSettings } });
+  };
+
+  const startNewConversation = () => {
+    stop();
+    setMessages([]);
+    setPrompt("");
+    setNotice("已开启新对话 · 当前建筑源码与预览保持不变");
   };
 
   const updateModelSettings = (settings: ModelSettings) => {
@@ -344,9 +359,20 @@ export function BuilderWorkbench() {
               <span className="eyebrow">ARCHITECT</span>
               <h1>与建筑 AI 对话</h1>
             </div>
-            <button className="model-badge" onClick={() => setSettingsOpen(true)} title={`${modelSettings.model} · 点击配置`}>
-              <span className="model-status-dot" /><Sparkles size={12} /> {providerLabel(modelSettings)}
-            </button>
+            <div className="panel-heading-actions">
+              <button
+                className="new-chat-button"
+                onClick={startNewConversation}
+                title="开启新对话（保留当前建筑）"
+                aria-label="开启新对话（保留当前建筑）"
+              >
+                <MessageSquarePlus size={14} />
+                <span>新对话</span>
+              </button>
+              <button className="model-badge" onClick={() => setSettingsOpen(true)} title={`${modelSettings.model} · 点击配置`}>
+                <span className="model-status-dot" /><Sparkles size={12} /> {providerLabel(modelSettings)}
+              </button>
+            </div>
           </div>
 
           <Conversation className="conversation">

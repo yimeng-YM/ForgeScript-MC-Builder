@@ -295,6 +295,12 @@ button {
   justify-content: space-between;
 }
 
+.panel-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .eyebrow {
   display: block;
   color: #7c837e;
@@ -330,6 +336,27 @@ button {
 
 .model-badge:hover { border-color: #7ca88d; background: #d5e8da; }
 .model-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #3b9f69; box-shadow: 0 0 0 3px rgb(59 159 105 / 0.12); }
+
+.new-chat-button {
+  min-height: 28px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #31513d;
+  border: 1px solid #b7c8bc;
+  border-radius: 7px;
+  background: #edf5ef;
+  font: 700 11px/1 var(--font-body);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.new-chat-button:hover {
+  color: #173c25;
+  border-color: #6d9b7c;
+  background: #d9ebdd;
+}
 
 button:focus-visible,
 input:focus-visible,

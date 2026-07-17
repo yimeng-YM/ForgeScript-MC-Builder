@@ -58,13 +58,20 @@ test("ships validated model provider presets and safe generation defaults", () =
 });
 
 test("executes generated JavaScript inside the controlled Building SDK", async () => {
-  const world = await executeBuilderSource(DEFAULT_SOURCE);
+  const world = await executeBuilderSource(sourceForPrompt("建造一座高塔", "1.21.11"));
   assert.equal(world.version, "1.21.11");
   assert.ok(world.blocks.length > 500);
   assert.deepEqual(
     validateWorld(world, pack).filter((diagnostic) => diagnostic.severity === "error"),
     [],
   );
+});
+
+test("starts with a neutral empty project instead of a demo building", async () => {
+  const world = await executeBuilderSource(DEFAULT_SOURCE);
+  assert.equal(world.name, "空白项目");
+  assert.equal(world.blocks.length, 0);
+  assert.doesNotMatch(DEFAULT_SOURCE, /小木屋|spruce_planks|oak_planks/);
 });
 
 test("safely interrupts runaway building scripts at the configured deadline", async () => {
@@ -139,7 +146,7 @@ test("resolves redstone wire straight lines, corners, and vertical climbs", asyn
 });
 
 test("encodes a gzip-compressed modern Litematic NBT payload", async () => {
-  const world = await executeBuilderSource(DEFAULT_SOURCE);
+  const world = await executeBuilderSource(sourceForPrompt("建造一座高塔", "1.21.11"));
   const blob = await createLitematicBlob(world, pack);
   const raw = gunzipSync(Buffer.from(await blob.arrayBuffer()));
   assert.equal(raw[0], 10);
