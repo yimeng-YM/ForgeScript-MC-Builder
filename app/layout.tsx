@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { headers } from "next/headers";
 import "./globals.css";
+
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://forgescript.mengstudystudio.cn";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,47 +14,39 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export async function generateMetadata(): Promise<Metadata> {
-  const requestHeaders = await headers();
-  const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
-  const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const baseUrl = `${protocol}://${host}`;
-  const imageUrl = `${baseUrl}/og.png`;
-  const faviconUrl = `${baseUrl}/forgescript-favicon-32.png`;
-  const appIconUrl = `${baseUrl}/forgescript-icon-512.png`;
-  const appleIconUrl = `${baseUrl}/forgescript-apple-touch-icon.png`;
-  const title = "ForgeScript — Minecraft AI 建筑工作台";
-  const description = "通过大模型生成受控 JavaScript，预览、校验并导出多版本 Minecraft Litematic 结构。";
-  return {
+const title = "ForgeScript — Minecraft AI 建筑工作台";
+const description = "通过大模型生成受控 JavaScript，预览、校验并导出多版本 Minecraft Litematic 结构。";
+
+export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
+  title,
+  description,
+  icons: {
+    icon: [
+      { url: "/forgescript-favicon-32.png", type: "image/png", sizes: "32x32" },
+      { url: "/forgescript-icon-512.png", type: "image/png", sizes: "512x512" },
+    ],
+    shortcut: "/forgescript-favicon-32.png",
+    apple: [{ url: "/forgescript-apple-touch-icon.png", type: "image/png", sizes: "180x180" }],
+  },
+  openGraph: {
     title,
     description,
-    icons: {
-      icon: [
-        { url: faviconUrl, type: "image/png", sizes: "32x32" },
-        { url: appIconUrl, type: "image/png", sizes: "512x512" },
-      ],
-      shortcut: faviconUrl,
-      apple: [{ url: appleIconUrl, type: "image/png", sizes: "180x180" }],
-    },
-    openGraph: {
-      title,
-      description,
-      type: "website",
-      images: [{ url: imageUrl, width: 1743, height: 905, alt: "ForgeScript Minecraft AI 建筑工作台" }],
-    },
-    twitter: {
-      card: "summary_large_image",
-      title,
-      description,
-      images: [imageUrl],
-    },
-  };
-}
+    type: "website",
+    images: [{ url: "/og.png", width: 1743, height: 905, alt: "ForgeScript Minecraft AI 建筑工作台" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title,
+    description,
+    images: ["/og.png"],
+  },
+};
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="zh-CN" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
+      <body>
         {children}
       </body>
     </html>

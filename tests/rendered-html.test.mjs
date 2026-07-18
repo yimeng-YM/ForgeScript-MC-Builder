@@ -30,6 +30,19 @@ test("server-renders the ForgeScript workbench shell", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
+test("pre-renders the home page so Cloudflare serves it without invoking the Worker", async () => {
+  const html = await readFile(new URL("../dist/client/index.html", import.meta.url), "utf8");
+  const workerConfig = JSON.parse(
+    await readFile(new URL("../dist/server/wrangler.json", import.meta.url), "utf8"),
+  );
+  const layoutSource = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
+
+  assert.match(html, /ForgeScript/);
+  assert.equal(workerConfig.assets.directory, "../client");
+  assert.equal(workerConfig.assets.run_worker_first, undefined);
+  assert.doesNotMatch(layoutSource, /next\/headers|generateMetadata|headers\(\)/);
+});
+
 test("the 3D viewport owns and releases one WebGL renderer", async () => {
   const source = await readFile(
     path.join(process.cwd(), "components", "builder", "viewport-3d.tsx"),
