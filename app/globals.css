@@ -358,6 +358,49 @@ button {
   background: #d9ebdd;
 }
 
+.agent-run-state {
+  min-height: 32px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #4d5c53;
+  border-bottom: 1px solid #d8d5cc;
+  background: #ebe9e2;
+  font-size: 10px;
+}
+
+.agent-run-state .status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #6d8f7a;
+}
+
+.agent-run-state.generating .status-dot,
+.agent-run-state.validating .status-dot,
+.agent-run-state.repairing .status-dot {
+  background: #c28b3c;
+  box-shadow: 0 0 0 3px rgb(194 139 60 / 0.14);
+}
+
+.agent-run-state.succeeded .status-dot { background: #3b9f69; }
+.agent-run-state.failed .status-dot,
+.agent-run-state.exhausted .status-dot { background: #bb5147; }
+.agent-run-state.cancelled .status-dot { background: #858b87; }
+.agent-run-state > span:nth-child(2) { flex: 1; }
+.agent-run-state button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #7b3933;
+  border: 0;
+  background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,

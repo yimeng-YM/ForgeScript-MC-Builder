@@ -1,3 +1,5 @@
+import { parse, type Node } from "acorn";
+
 export type SourcePreflightResult =
   | {
       accepted: true;
@@ -15,132 +17,109 @@ export type SourcePreflightResult =
       error: string;
     };
 
-type ScanResult = {
-  codeOnly: string;
-  withoutComments: string;
-  error?: string;
-};
+type AstNode = Node & Record<string, unknown>;
 
-const PAIRS: Record<string, string> = {
-  "(": ")",
-  "[": "]",
-  "{": "}",
-};
+const FORBIDDEN_IDENTIFIERS = new Map([
+  ["fetch", "fetch"],
+  ["XMLHttpRequest", "网络 API"],
+  ["WebSocket", "网络 API"],
+  ["EventSource", "网络 API"],
+  ["Worker", "Worker API"],
+  ["SharedWorker", "Worker API"],
+  ["document", "浏览器全局对象"],
+  ["window", "浏览器全局对象"],
+  ["globalThis", "全局对象"],
+  ["self", "全局对象"],
+  ["navigator", "浏览器全局对象"],
+  ["location", "浏览器全局对象"],
+  ["localStorage", "浏览器存储"],
+  ["sessionStorage", "浏览器存储"],
+  ["indexedDB", "浏览器存储"],
+  ["caches", "浏览器存储"],
+  ["process", "宿主运行时对象"],
+  ["Deno", "宿主运行时对象"],
+  ["Bun", "宿主运行时对象"],
+  ["eval", "动态代码执行"],
+  ["Function", "动态代码执行"],
+  ["require", "模块加载"],
+  ["importScripts", "模块加载"],
+  ["setTimeout", "异步调度 API"],
+  ["setInterval", "异步调度 API"],
+  ["queueMicrotask", "异步调度 API"],
+  ["__collectBuild", "沙箱内部收集器"],
+]);
 
-/**
- * Produces a code-only view for structural checks without evaluating user code.
- * The comment-free view keeps string literals so metadata and block IDs can be read.
- */
-function scanSource(source: string): ScanResult {
-  let codeOnly = "";
-  let withoutComments = "";
-  let state: "code" | "line-comment" | "block-comment" | "single" | "double" | "template" = "code";
-  let escaped = false;
-  const stack: Array<{ token: string; index: number }> = [];
+const REGION_OPERATIONS = new Set([
+  "set",
+  "fill",
+  "hollowBox",
+  "walls",
+  "line",
+  "pillar",
+  "replace",
+]);
 
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
-
-    if (state === "line-comment") {
-      const replacement = char === "\n" ? "\n" : " ";
-      codeOnly += replacement;
-      withoutComments += replacement;
-      if (char === "\n") state = "code";
-      continue;
-    }
-
-    if (state === "block-comment") {
-      if (char === "*" && next === "/") {
-        codeOnly += "  ";
-        withoutComments += "  ";
-        index += 1;
-        state = "code";
-      } else {
-        const replacement = char === "\n" ? "\n" : " ";
-        codeOnly += replacement;
-        withoutComments += replacement;
-      }
-      continue;
-    }
-
-    if (state !== "code") {
-      codeOnly += char === "\n" ? "\n" : " ";
-      withoutComments += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (
-        (state === "single" && char === "'") ||
-        (state === "double" && char === '"') ||
-        (state === "template" && char === "`")
-      ) {
-        state = "code";
-      }
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      codeOnly += "  ";
-      withoutComments += "  ";
-      index += 1;
-      state = "line-comment";
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      codeOnly += "  ";
-      withoutComments += "  ";
-      index += 1;
-      state = "block-comment";
-      continue;
-    }
-    if (char === "'" || char === '"' || char === "`") {
-      codeOnly += " ";
-      withoutComments += char;
-      state = char === "'" ? "single" : char === '"' ? "double" : "template";
-      continue;
-    }
-
-    if (char in PAIRS) {
-      stack.push({ token: char, index });
-    } else if (char === ")" || char === "]" || char === "}") {
-      const opening = stack.pop();
-      if (!opening || PAIRS[opening.token] !== char) {
-        return { codeOnly, withoutComments, error: `第 ${index + 1} 个字符附近存在不匹配的 ${char}` };
-      }
-    }
-
-    codeOnly += char;
-    withoutComments += char;
-  }
-
-  if (state === "block-comment") {
-    return { codeOnly, withoutComments, error: "源码中存在未结束的块注释" };
-  }
-  if (state === "single" || state === "double" || state === "template") {
-    return { codeOnly, withoutComments, error: "源码中存在未结束的字符串" };
-  }
-  const opening = stack.at(-1);
-  if (opening) {
-    return {
-      codeOnly,
-      withoutComments,
-      error: `第 ${opening.index + 1} 个字符附近的 ${opening.token} 没有闭合`,
-    };
-  }
-  return { codeOnly, withoutComments };
+function isNode(value: unknown): value is AstNode {
+  return Boolean(value && typeof value === "object" && typeof (value as { type?: unknown }).type === "string");
 }
 
-const FORBIDDEN_CODE: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /\bfetch\s*\(/, label: "fetch" },
-  { pattern: /\b(?:XMLHttpRequest|WebSocket|EventSource|Worker|SharedWorker)\b/, label: "网络或 Worker API" },
-  { pattern: /\b(?:document|window|navigator|location|localStorage|sessionStorage|indexedDB|caches)\b/, label: "浏览器全局对象" },
-  { pattern: /\b(?:process|Deno|Bun)\b/, label: "宿主运行时对象" },
-  { pattern: /\b(?:eval|Function|require|importScripts)\s*\(/, label: "动态代码或模块加载" },
-  { pattern: /\bimport\b/, label: "模块导入" },
-  { pattern: /\b(?:setTimeout|setInterval|queueMicrotask)\s*\(/, label: "计时或异步调度 API" },
-];
+function walk(node: AstNode, visit: (node: AstNode) => void) {
+  visit(node);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "start" || key === "end" || key === "loc") continue;
+    if (node.type === "MemberExpression" && key === "property" && node.computed !== true) continue;
+    if ((node.type === "Property" || node.type === "MethodDefinition") && key === "key" && node.computed !== true) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) if (isNode(item)) walk(item, visit);
+    } else if (isNode(value)) {
+      walk(value, visit);
+    }
+  }
+}
+
+function propertyName(node: AstNode | undefined): string | null {
+  if (!node || node.type !== "MemberExpression") return null;
+  const property = node.property;
+  if (!isNode(property)) return null;
+  if (node.computed !== true && property.type === "Identifier") return String(property.name);
+  if (node.computed === true && property.type === "Literal" && typeof property.value === "string") {
+    return property.value;
+  }
+  return null;
+}
+
+function literalString(node: unknown): string | null {
+  return isNode(node) && node.type === "Literal" && typeof node.value === "string"
+    ? node.value
+    : null;
+}
+
+function callArguments(node: AstNode): AstNode[] {
+  return Array.isArray(node.arguments) ? node.arguments.filter(isNode) : [];
+}
+
+function isMemberCall(node: AstNode, objectName: string, methodName: string) {
+  if (node.type !== "CallExpression" || !isNode(node.callee) || node.callee.type !== "MemberExpression") {
+    return false;
+  }
+  const object = node.callee.object;
+  return isNode(object)
+    && object.type === "Identifier"
+    && object.name === objectName
+    && propertyName(node.callee) === methodName;
+}
+
+function isRegionFactoryCall(node: AstNode) {
+  return node.type === "CallExpression"
+    && isNode(node.callee)
+    && node.callee.type === "MemberExpression"
+    && propertyName(node.callee) === "region";
+}
+
+function namespaceError(blockId: string) {
+  if (!/^[a-z0-9_./-]+$/i.test(blockId) || blockId.includes(":")) return null;
+  return `方块 ID ${blockId} 缺少命名空间；请使用 minecraft:${blockId}`;
+}
 
 export function preflightBuilderSource(
   source: string,
@@ -151,38 +130,126 @@ export function preflightBuilderSource(
     return { accepted: false, stage: "structure", error: "提交的源码为空" };
   }
 
-  const scanned = scanSource(source);
-  if (scanned.error) {
-    return { accepted: false, stage: "syntax", error: scanned.error };
+  let program: AstNode;
+  try {
+    program = parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      locations: true,
+    }) as unknown as AstNode;
+  } catch (error) {
+    const syntax = error as Error & { loc?: { line: number; column: number } };
+    const location = syntax.loc ? `第 ${syntax.loc.line} 行第 ${syntax.loc.column + 1} 列：` : "";
+    return { accepted: false, stage: "syntax", error: `${location}${syntax.message}` };
   }
 
-  if (!/\bmc\s*\.\s*build\s*\(/.test(scanned.codeOnly)) {
+  let securityError = "";
+  let buildCall: AstNode | null = null;
+  let regionCount = 0;
+  let operationCount = 0;
+  const regionVariables = new Set<string>();
+  const blockIdCandidates: string[] = [];
+
+  walk(program, (node) => {
+    if (securityError) return;
+
+    if (
+      node.type === "ImportDeclaration"
+      || node.type === "ImportExpression"
+      || node.type === "ExportNamedDeclaration"
+      || node.type === "ExportDefaultDeclaration"
+      || node.type === "ExportAllDeclaration"
+    ) {
+      securityError = "受控 Building SDK 不允许模块导入或导出";
+      return;
+    }
+    if (node.type === "AwaitExpression") {
+      securityError = "受控 Building SDK 不允许异步等待";
+      return;
+    }
+    if (node.type === "Identifier") {
+      const label = FORBIDDEN_IDENTIFIERS.get(String(node.name));
+      if (label) {
+        securityError = `受控 Building SDK 不允许使用 ${label}`;
+        return;
+      }
+    }
+    if (
+      (node.type === "WhileStatement"
+        && isNode(node.test)
+        && node.test.type === "Literal"
+        && (node.test.value === true || node.test.value === 1))
+      || (node.type === "ForStatement" && node.test == null)
+    ) {
+      securityError = "源码包含明显不会结束的循环";
+      return;
+    }
+
+    if (isMemberCall(node, "mc", "build")) buildCall ??= node;
+
+    if (isRegionFactoryCall(node)) regionCount += 1;
+    if (
+      node.type === "VariableDeclarator"
+      && isNode(node.id)
+      && node.id.type === "Identifier"
+      && isNode(node.init)
+      && isRegionFactoryCall(node.init)
+    ) {
+      regionVariables.add(String(node.id.name));
+    }
+
+    if (node.type !== "CallExpression" || !isNode(node.callee)) return;
+    if (node.callee.type === "Identifier" && node.callee.name === "block") {
+      const blockId = literalString(callArguments(node)[0]);
+      if (blockId) blockIdCandidates.push(blockId);
+      return;
+    }
+    if (node.callee.type !== "MemberExpression") return;
+    const method = propertyName(node.callee);
+    if (!method || !REGION_OPERATIONS.has(method)) return;
+    const receiver = node.callee.object;
+    const isKnownRegion = (
+      isNode(receiver)
+      && ((receiver.type === "Identifier" && regionVariables.has(String(receiver.name))) || isRegionFactoryCall(receiver))
+    );
+    if (!isKnownRegion) return;
+
+    operationCount += 1;
+    const args = callArguments(node);
+    const possibleBlockArgs = method === "replace" ? args.slice(-2) : args.slice(-1);
+    for (const argument of possibleBlockArgs) {
+      const blockId = literalString(argument);
+      if (blockId) blockIdCandidates.push(blockId);
+    }
+  });
+
+  if (securityError) return { accepted: false, stage: "security", error: securityError };
+  if (!buildCall) {
     return { accepted: false, stage: "structure", error: "源码必须调用 mc.build(...) 提交建筑" };
   }
 
-  for (const rule of FORBIDDEN_CODE) {
-    if (rule.pattern.test(scanned.codeOnly)) {
-      return {
-        accepted: false,
-        stage: "security",
-        error: `受控 Building SDK 不允许使用 ${rule.label}`,
-      };
-    }
-  }
-
-  if (/\bwhile\s*\(\s*(?:true|1)\s*\)|\bfor\s*\(\s*;\s*;\s*\)/.test(scanned.codeOnly)) {
-    return { accepted: false, stage: "security", error: "源码包含明显不会结束的循环" };
-  }
-
-  const versionMatch = scanned.withoutComments.match(/\bversion\s*:\s*(["'])([^"']+)\1/);
-  if (!versionMatch) {
+  const metadata = callArguments(buildCall)[0];
+  if (!metadata || metadata.type !== "ObjectExpression" || !Array.isArray(metadata.properties)) {
     return {
       accepted: false,
       stage: "metadata",
       error: `mc.build 元数据必须显式声明 version: "${targetVersion}"`,
     };
   }
-  const declaredVersion = versionMatch[2];
+  let declaredVersion: string | null = null;
+  for (const property of metadata.properties.filter(isNode)) {
+    if (property.type !== "Property" || !isNode(property.key)) continue;
+    const key = property.key.type === "Identifier" ? property.key.name : literalString(property.key);
+    if (key !== "version") continue;
+    declaredVersion = literalString(property.value);
+  }
+  if (!declaredVersion) {
+    return {
+      accepted: false,
+      stage: "metadata",
+      error: `mc.build 元数据必须显式声明 version: "${targetVersion}"`,
+    };
+  }
   if (declaredVersion !== targetVersion) {
     return {
       accepted: false,
@@ -191,21 +258,10 @@ export function preflightBuilderSource(
     };
   }
 
-  for (const match of scanned.withoutComments.matchAll(/\bblock\s*\(\s*(["'])([^"']+)\1/g)) {
-    const blockId = match[2];
-    if (/^[a-z0-9_./-]+$/i.test(blockId) && !blockId.includes(":")) {
-      return {
-        accepted: false,
-        stage: "structure",
-        error: `方块 ID ${blockId} 缺少命名空间；请使用 minecraft:${blockId}`,
-      };
-    }
+  for (const blockId of blockIdCandidates) {
+    const error = namespaceError(blockId);
+    if (error) return { accepted: false, stage: "structure", error };
   }
-
-  const regionCount = (scanned.codeOnly.match(/\.\s*region\s*\(/g) ?? []).length;
-  const operationCount = (
-    scanned.codeOnly.match(/\.\s*(?:set|fill|hollowBox|walls|line|pillar|replace)\s*\(/g) ?? []
-  ).length;
 
   return {
     accepted: true,

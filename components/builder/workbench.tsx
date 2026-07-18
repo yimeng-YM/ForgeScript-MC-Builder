@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type UIMessage } from "ai";
-import type { FileUIPart } from "ai";
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import type { ChatAddToolOutputFunction, FileUIPart } from "ai";
 import {
   Box,
   Braces,
@@ -29,6 +29,7 @@ import {
   Send,
   Settings2,
   Sparkles,
+  Square,
   Undo2,
   X,
   WandSparkles,
@@ -60,6 +61,15 @@ import {
   type ModelProfile,
   type ModelSettings,
 } from "@/lib/ai/model-settings";
+import {
+  commitSourceInputSchema,
+  commitSourceOutputSchema,
+  latestCommitOutput,
+  type BuilderUIMessage,
+  type CommitSourceOutput,
+} from "@/lib/ai/agent-protocol";
+import { loadAgentSession, saveAgentSession } from "@/lib/ai/agent-persistence";
+import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { DEFAULT_SOURCE } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
 import { executeBuilderSource } from "@/lib/minecraft/runner";
@@ -77,6 +87,14 @@ import {
 } from "@/lib/minecraft/versions";
 
 type WorkspaceTab = "preview" | "source" | "diagnostics";
+type AgentRunStatus = "idle" | "generating" | "validating" | "repairing" | "succeeded" | "failed" | "exhausted" | "cancelled";
+type AgentRunState = {
+  id: string | null;
+  status: AgentRunStatus;
+  attempt: number;
+  maxAttempts: number;
+  error?: string;
+};
 
 const EMPTY_WORLD: WorldDocument = {
   name: "空白项目",
@@ -88,14 +106,14 @@ const EMPTY_WORLD: WorldDocument = {
 
 const quickPrompts = ["生成一座云杉生存小屋", "设计可调延迟红石链", "建造一座铜顶瞭望塔"];
 
-function messageText(message: UIMessage) {
+function messageText(message: BuilderUIMessage) {
   return message.parts
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("");
 }
 
-function committedSource(message: UIMessage): string | null {
+function committedSource(message: BuilderUIMessage): string | null {
   for (const part of message.parts) {
     if (part.type !== "tool-commit_source" || !("input" in part)) continue;
     const output = "output" in part ? part.output as { accepted?: unknown } | undefined : undefined;
@@ -106,10 +124,19 @@ function committedSource(message: UIMessage): string | null {
   return null;
 }
 
-function messageImages(message: UIMessage) {
+function messageImages(message: BuilderUIMessage) {
   return message.parts.filter((part): part is FileUIPart =>
     part.type === "file" && part.mediaType.startsWith("image/"),
   );
+}
+
+function sourceBeforeMessage(messages: BuilderUIMessage[], messageId: string) {
+  let historicalSource = DEFAULT_SOURCE;
+  for (const message of messages) {
+    if (message.id === messageId) return historicalSource;
+    historicalSource = committedSource(message) ?? historicalSource;
+  }
+  return historicalSource;
 }
 
 function fileToUIPart(file: File): Promise<FileUIPart> {
@@ -173,9 +200,22 @@ export function BuilderWorkbench() {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [notice, setNotice] = useState("正在载入版本化方块注册表…");
+  const [agentRun, setAgentRun] = useState<AgentRunState>({
+    id: null,
+    status: "idle",
+    attempt: 0,
+    maxAttempts: 1,
+  });
   const executionTimeoutRef = useRef(DEFAULT_MODEL_SETTINGS.builder.executionTimeoutMs);
   const maxBuildBlocksRef = useRef(DEFAULT_MODEL_SETTINGS.builder.maxBuildBlocks);
-  const autoFixCountRef = useRef(0);
+  const activeRunRef = useRef<{ id: string; attempt: number; maxAttempts: number } | null>(null);
+  const addToolOutputRef = useRef<ChatAddToolOutputFunction<BuilderUIMessage> | null>(null);
+  const packRef = useRef<VersionPack | null>(null);
+  const sourceSnapshotsRef = useRef<Record<string, { source: string; version: string }>>({});
+  const persistenceReadyRef = useRef(false);
+  const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialVersionRef = useRef(version);
+  const restoredSourceToRunRef = useRef<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
@@ -187,9 +227,7 @@ export function BuilderWorkbench() {
   const warnings = diagnostics.filter((item) => item.severity === "warning").length;
   const chatTransport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
 
-  const runWith = useCallback(async (nextSource: string, nextPack: VersionPack) => {
-    setRunning(true);
-    setNotice("QuickJS 沙箱正在执行建筑脚本…");
+  const evaluateSource = useCallback(async (nextSource: string, nextPack: VersionPack) => {
     try {
       const nextWorld = await executeBuilderSource(nextSource, {
         timeoutMs: executionTimeoutRef.current,
@@ -203,36 +241,46 @@ export function BuilderWorkbench() {
           }]
         : [];
       const nextDiagnostics = [...sizeDiagnostics, ...validateWorld(nextWorld, nextPack)];
-      setWorld(nextWorld);
-      setDiagnostics(nextDiagnostics);
-      setSelected(null);
-
-      const errorDiagnostics = nextDiagnostics.filter((item) => item.severity === "error");
-      if (errorDiagnostics.length > 0) {
-        setNotice(`运行完成，但发现 ${errorDiagnostics.length} 个阻断错误`);
-        return errorDiagnostics;
-      } else {
-        setNotice(`运行成功 · ${nextWorld.blocks.length.toLocaleString()} 个方块 · ${nextPack.blockCount.toLocaleString()} 个版本方块可用`);
-        return [];
-      }
+      return {
+        world: nextWorld,
+        diagnostics: nextDiagnostics,
+        errors: nextDiagnostics.filter((item) => item.severity === "error"),
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const runtimeDiagnostics: Diagnostic[] = [
-        {
-          severity: "error",
-          stage: "runtime",
-          code: "SCRIPT_RUNTIME_ERROR",
-          message,
-        },
-      ];
-      setDiagnostics(runtimeDiagnostics);
-      setNotice("源码运行失败；已保留上一次成功预览");
-      setActiveTab("diagnostics");
-      return runtimeDiagnostics;
+      const runtimeDiagnostics: Diagnostic[] = [{
+        severity: "error",
+        stage: "runtime",
+        code: "SCRIPT_RUNTIME_ERROR",
+        message,
+      }];
+      return { world: null, diagnostics: runtimeDiagnostics, errors: runtimeDiagnostics };
+    }
+  }, []);
+
+  const runWith = useCallback(async (nextSource: string, nextPack: VersionPack) => {
+    setRunning(true);
+    setNotice("QuickJS 沙箱正在执行建筑脚本…");
+    try {
+      const result = await evaluateSource(nextSource, nextPack);
+      setDiagnostics(result.diagnostics);
+      if (result.world) {
+        setWorld(result.world);
+        setSelected(null);
+      }
+      if (result.errors.length > 0) {
+        setNotice(result.world
+          ? `运行完成，但发现 ${result.errors.length} 个阻断错误`
+          : "源码运行失败；已保留上一次成功预览");
+        setActiveTab("diagnostics");
+      } else if (result.world) {
+        setNotice(`运行成功 · ${result.world.blocks.length.toLocaleString()} 个方块 · ${nextPack.blockCount.toLocaleString()} 个版本方块可用`);
+      }
+      return result.errors;
     } finally {
       setRunning(false);
     }
-  }, []);
+  }, [evaluateSource]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -249,12 +297,25 @@ export function BuilderWorkbench() {
 
   useEffect(() => {
     let cancelled = false;
-    loadVersionPack("1.21.11")
+    const entry = VERSION_OPTIONS.find((item) => item.id === version);
+    packRef.current = null;
+    if (!entry || entry.experimental) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    loadVersionPack(version)
       .then((loaded) => {
         if (cancelled) return;
         setPack(loaded);
+        packRef.current = loaded;
         setPackStatus("ready");
-        setNotice(`空白项目已就绪 · ${loaded.blockCount.toLocaleString()} 个版本方块可用`);
+        setNotice(`Minecraft ${version} 已就绪 · ${loaded.blockCount.toLocaleString()} 个版本方块可用`);
+        const restoredSource = restoredSourceToRunRef.current;
+        if (restoredSource) {
+          restoredSourceToRunRef.current = null;
+          void runWith(restoredSource, loaded);
+        }
       })
       .catch((error) => {
         if (cancelled) return;
@@ -264,69 +325,254 @@ export function BuilderWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [runWith]);
+  }, [runWith, version]);
 
   const {
     messages,
     sendMessage,
     setMessages,
     stop,
+    addToolOutput,
     status: chatStatus,
     error: chatError,
-  } = useChat({
+  } = useChat<BuilderUIMessage>({
     transport: chatTransport,
-    onFinish: async ({ message }) => {
-      const nextSource = committedSource(message);
-      if (!nextSource) {
-        autoFixCountRef.current = 0; // 如果 AI 没有生成或提交源码，重置修复计数
+    sendAutomaticallyWhen: ({ messages: nextMessages }) => (
+      activeRunRef.current !== null
+      && lastAssistantMessageIsCompleteWithToolCalls({ messages: nextMessages })
+    ),
+    onToolCall: async ({ toolCall }) => {
+      if (toolCall.toolName !== "commit_source") return;
+      const activeRun = activeRunRef.current;
+      if (!activeRun) return;
+      const parsedInput = commitSourceInputSchema.safeParse(toolCall.input);
+      if (!parsedInput.success) {
+        const output: CommitSourceOutput = {
+          accepted: false,
+          stage: "structure",
+          error: "模型提交的 commit_source 参数无效",
+          terminal: true,
+          attempt: activeRun.attempt + 1,
+          maxAttempts: activeRun.maxAttempts,
+        };
+        setAgentRun({ ...activeRun, status: "failed", attempt: output.attempt ?? 1, error: output.error });
+        void addToolOutputRef.current?.({
+          tool: "commit_source",
+          toolCallId: toolCall.toolCallId,
+          output,
+          options: { body: { version, source, settings: modelSettings } },
+        });
         return;
       }
-      setSource(nextSource);
-      setActiveTab("preview");
-      if (pack && modelSettings.builder.autoRunAfterGeneration) {
-        const errors = await runWith(nextSource, pack);
-        if (errors && errors.length > 0) {
-          if (autoFixCountRef.current < modelSettings.builder.maxAutoFixAttempts) {
-            autoFixCountRef.current += 1;
-            const errorReport = errors
-              .map((err, i) => `${i + 1}. [${err.code}] ${err.message}${err.block ? ` 在坐标 x:${err.block.x}, y:${err.block.y}, z:${err.block.z}` : ""}`)
-              .join("\n");
 
-            const retryMessage = `刚才提交的 JavaScript 源码在沙箱运行或方块属性校验中遇到了以下阻断错误，请分析并修改源码予以解决。注意：请必须提交包含修复的完整 JavaScript 代码，且不要在对话中直接粘出大段代码。\n\n【阻断错误报告】\n${errorReport}`;
+      const { source: nextSource, summary, version: claimedVersion } = parsedInput.data;
+      const attempt = activeRun.attempt + 1;
+      activeRunRef.current = { ...activeRun, attempt };
+      setAgentRun({ ...activeRun, status: "validating", attempt });
+      setRunning(true);
+      setNotice(`Agent 正在执行第 ${attempt}/${activeRun.maxAttempts} 次完整校验…`);
 
-            setNotice(`版本注册表发现阻断错误，Agent 正在进行第 ${autoFixCountRef.current}/${modelSettings.builder.maxAutoFixAttempts} 次二阶段修正…`);
+      const returnFailure = (failure: Omit<CommitSourceOutput, "accepted" | "attempt" | "maxAttempts">) => {
+        const exhausted = attempt >= activeRun.maxAttempts;
+        const output = commitSourceOutputSchema.parse({
+          accepted: false,
+          ...failure,
+          terminal: exhausted || failure.terminal === true,
+          exhausted,
+          attempt,
+          maxAttempts: activeRun.maxAttempts,
+        });
+        setAgentRun({
+          ...activeRun,
+          status: exhausted ? "exhausted" : "repairing",
+          attempt,
+          error: output.error,
+        });
+        setNotice(exhausted
+          ? `Agent 在 ${activeRun.maxAttempts} 次完整校验后仍未收敛`
+          : `第 ${attempt} 次校验未通过，Agent 正在依据工具结果继续修正…`);
+        void addToolOutputRef.current?.({
+          tool: "commit_source",
+          toolCallId: toolCall.toolCallId,
+          output,
+          options: { body: { version: claimedVersion, source, settings: modelSettings } },
+        });
+      };
 
-            // 自动追问，并在创建消息时直接标记为内部修正，避免短暂闪现在 UI 中。
-            setTimeout(() => {
-              void sendMessage(
-                { text: retryMessage, metadata: { isAutoFix: true } },
-                {
-                  body: {
-                    version,
-                    source: nextSource,
-                    settings: modelSettings,
-                  },
-                }
-              );
-            }, 1000);
-          } else {
-            setNotice(`二阶段自动修正已达 ${modelSettings.builder.maxAutoFixAttempts} 次上限，仍存在阻断错误。请手动修改或更换提示词。`);
-            autoFixCountRef.current = 0; // 达到最大重试后重置
-          }
-        } else {
-          // 运行成功且无阻断错误，重置计数
-          autoFixCountRef.current = 0;
+      try {
+        if (claimedVersion !== version) {
+          returnFailure({
+            stage: "metadata",
+            error: `源码声明版本 ${claimedVersion}，但当前工作区目标版本是 ${version}`,
+          });
+          return;
         }
-      } else {
-        autoFixCountRef.current = 0;
+
+        const preflight = preflightBuilderSource(
+          nextSource,
+          claimedVersion,
+          maxBuildBlocksRef.current,
+        );
+        if (!preflight.accepted) {
+          returnFailure(preflight);
+          return;
+        }
+
+        const validationPack = packRef.current?.gameVersion === claimedVersion
+          ? packRef.current
+          : await loadVersionPack(claimedVersion);
+        if (activeRunRef.current?.id !== activeRun.id) return;
+        const evaluation = await evaluateSource(nextSource, validationPack);
+        if (activeRunRef.current?.id !== activeRun.id) return;
+
+        setDiagnostics(evaluation.diagnostics);
+        if (evaluation.errors.length > 0 || !evaluation.world) {
+          const errorReport = evaluation.errors.slice(0, 40).map((diagnostic, index) => (
+            `${index + 1}. [${diagnostic.code}] ${diagnostic.message}${diagnostic.block
+              ? ` @ ${diagnostic.block.x},${diagnostic.block.y},${diagnostic.block.z}`
+              : ""}`
+          )).join("\n");
+          returnFailure({
+            stage: evaluation.errors.some((item) => item.stage === "runtime") ? "runtime" : "registry",
+            error: errorReport.slice(0, 20_000),
+          });
+          setActiveTab("diagnostics");
+          return;
+        }
+
+        const nextStats = getWorldStats(evaluation.world);
+        setSource(nextSource);
+        setSelected(null);
+        if (modelSettings.builder.autoRunAfterGeneration) {
+          setWorld(evaluation.world);
+          setActiveTab("preview");
+        } else {
+          setActiveTab("source");
+        }
+        const output = commitSourceOutputSchema.parse({
+          ...preflight,
+          summary,
+          stage: "registry",
+          terminal: true,
+          attempt,
+          maxAttempts: activeRun.maxAttempts,
+          validation: {
+            ...preflight.validation,
+            blockCount: nextStats.blockCount,
+            paletteSize: nextStats.paletteSize,
+            size: nextStats.size,
+          },
+        });
+        setAgentRun({ ...activeRun, status: "succeeded", attempt });
+        setNotice(`Agent 完整校验通过 · ${nextStats.blockCount.toLocaleString()} 个方块 · 第 ${attempt} 次提交`);
+        void addToolOutputRef.current?.({
+          tool: "commit_source",
+          toolCallId: toolCall.toolCallId,
+          output,
+          options: { body: { version: claimedVersion, source: nextSource, settings: modelSettings } },
+        });
+      } catch (error) {
+        if (activeRunRef.current?.id !== activeRun.id) return;
+        returnFailure({
+          stage: "runtime",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (activeRunRef.current?.id === activeRun.id) setRunning(false);
       }
     },
+    onFinish: ({ message, messages: nextMessages, isAbort, isError }) => {
+      if (isAbort) return;
+      const activeRun = activeRunRef.current;
+      if (!activeRun) return;
+      const lastStepStartIndex = message.parts.reduce(
+        (lastIndex, part, index) => part.type === "step-start" ? index : lastIndex,
+        -1,
+      );
+      const toolParts = message.parts
+        .slice(lastStepStartIndex + 1)
+        .filter((part) => part.type === "tool-commit_source");
+      const invalidToolPart = toolParts.find((part) => part.state === "output-error");
+      if (invalidToolPart) {
+        const attempt = activeRun.attempt + 1;
+        const exhausted = attempt >= activeRun.maxAttempts;
+        if (exhausted) activeRunRef.current = null;
+        else activeRunRef.current = { ...activeRun, attempt };
+        setAgentRun({
+          ...activeRun,
+          status: exhausted ? "exhausted" : "repairing",
+          attempt,
+          error: invalidToolPart.errorText,
+        });
+        setNotice(exhausted
+          ? `Agent 连续提交无效工具参数，已在 ${activeRun.maxAttempts} 次后停止`
+          : `第 ${attempt} 次工具参数无效，Agent 正在修正…`);
+        return;
+      }
+      if (toolParts.length > 0) return;
+      const terminal = latestCommitOutput(nextMessages);
+      if (isError || !terminal) {
+        setAgentRun({ ...activeRun, status: "failed", error: "模型未提交可验证的完整源码" });
+        setNotice("Agent 已停止：模型未提交可验证的完整源码");
+      } else if (terminal.accepted) {
+        setAgentRun({ ...activeRun, status: "succeeded", attempt: activeRun.attempt });
+      } else if (terminal.exhausted) {
+        setAgentRun({ ...activeRun, status: "exhausted", attempt: activeRun.attempt, error: terminal.error });
+      } else {
+        setAgentRun({ ...activeRun, status: "failed", attempt: activeRun.attempt, error: terminal.error });
+      }
+      activeRunRef.current = null;
+    },
+    onError: (error) => {
+      const activeRun = activeRunRef.current;
+      if (!activeRun) return;
+      setAgentRun({ ...activeRun, status: "failed", error: error.message });
+      setNotice(`Agent 请求失败：${error.message}`);
+      activeRunRef.current = null;
+    },
   });
+
+  useEffect(() => {
+    addToolOutputRef.current = addToolOutput;
+    return () => {
+      addToolOutputRef.current = null;
+    };
+  }, [addToolOutput]);
+
+  const beginAgentRun = () => {
+    const id = crypto.randomUUID();
+    const maxAttempts = Math.max(
+      1,
+      Math.min(
+        modelSettings.generation.maxSteps,
+        modelSettings.builder.maxAutoFixAttempts + 1,
+      ),
+    );
+    activeRunRef.current = { id, attempt: 0, maxAttempts };
+    setAgentRun({ id, status: "generating", attempt: 0, maxAttempts });
+    return id;
+  };
+
+  const cancelAgentRun = async (message = "Agent 运行已取消") => {
+    if (!activeRunRef.current && chatStatus !== "streaming" && chatStatus !== "submitted") return;
+    const current = activeRunRef.current;
+    activeRunRef.current = null;
+    setRunning(false);
+    setAgentRun({
+      id: current?.id ?? null,
+      status: "cancelled",
+      attempt: current?.attempt ?? 0,
+      maxAttempts: current?.maxAttempts ?? 1,
+    });
+    setNotice(message);
+    await stop();
+  };
 
   const changeVersion = async (nextVersion: string) => {
     if (nextVersion === version) return;
     const entry = VERSION_OPTIONS.find((item) => item.id === nextVersion);
     if (!entry) return;
+    await cancelAgentRun("版本已切换，当前 Agent 运行已取消");
     const nextSource = source.replace(/version:\s*["'][^"']+["']/, `version: "${nextVersion}"`);
     setVersion(nextVersion);
     setSource(nextSource);
@@ -340,47 +586,61 @@ export function BuilderWorkbench() {
       setNotice(`${nextVersion} 实验版本已锁定；等待版本包`);
       return;
     }
-    try {
-      const loaded = await loadVersionPack(nextVersion);
-      setPack(loaded);
-      setPackStatus("ready");
-      setNotice(`已复制到 Minecraft ${nextVersion} 迁移上下文，正在重新校验…`);
-      await runWith(nextSource, loaded);
-    } catch (error) {
-      setPackStatus("error");
-      setPackError(error instanceof Error ? error.message : String(error));
-    }
+    setNotice(`已切换到 Minecraft ${nextVersion}，正在加载版本包…`);
   };
 
   const submitPrompt = async (value = prompt) => {
     const text = value.trim();
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setPrompt("");
-    autoFixCountRef.current = 0; // 用户手动输入，重置自动修复计数
     const files = attachments;
     setAttachments([]);
-    await sendMessage({ text, files }, { body: { version, source, settings: modelSettings } });
-  };
-
-  const retryUserMessage = async (message: UIMessage) => {
-    if (chatStatus === "streaming" || chatStatus === "submitted") return;
-    autoFixCountRef.current = 0;
-    setNotice("正在从这条用户消息重新运行 Agent…");
+    const messageId = crypto.randomUUID();
+    sourceSnapshotsRef.current[messageId] = { source, version };
+    beginAgentRun();
     await sendMessage(
-      { text: messageText(message), files: messageImages(message), messageId: message.id },
+      {
+        id: messageId,
+        role: "user",
+        parts: [...files, { type: "text", text }],
+      },
       { body: { version, source, settings: modelSettings } },
     );
   };
 
-  const saveEditedMessage = async (message: UIMessage) => {
+  const retryUserMessage = async (message: BuilderUIMessage) => {
+    if (chatStatus === "streaming" || chatStatus === "submitted") return;
+    const snapshot = sourceSnapshotsRef.current[message.id] ?? {
+      source: sourceBeforeMessage(messages, message.id),
+      version,
+    };
+    sourceSnapshotsRef.current[message.id] = snapshot;
+    setSource(snapshot.source);
+    setVersion(snapshot.version);
+    beginAgentRun();
+    setNotice("正在从这条用户消息重新运行 Agent…");
+    await sendMessage(
+      { text: messageText(message), files: messageImages(message), messageId: message.id },
+      { body: { version: snapshot.version, source: snapshot.source, settings: modelSettings } },
+    );
+  };
+
+  const saveEditedMessage = async (message: BuilderUIMessage) => {
     const text = editingText.trim();
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setEditingMessageId(null);
-    autoFixCountRef.current = 0;
+    const snapshot = sourceSnapshotsRef.current[message.id] ?? {
+      source: sourceBeforeMessage(messages, message.id),
+      version,
+    };
+    sourceSnapshotsRef.current[message.id] = snapshot;
+    setSource(snapshot.source);
+    setVersion(snapshot.version);
+    beginAgentRun();
     setNotice("已修改消息，正在重新运行后续 Agent 流程…");
     await sendMessage(
       { text, files: messageImages(message), messageId: message.id },
-      { body: { version, source, settings: modelSettings } },
+      { body: { version: snapshot.version, source: snapshot.source, settings: modelSettings } },
     );
   };
 
@@ -414,12 +674,72 @@ export function BuilderWorkbench() {
     }
   };
 
-  const startNewConversation = () => {
-    stop();
+  useEffect(() => {
+    let cancelled = false;
+    void loadAgentSession()
+      .then((session) => {
+        if (cancelled) return;
+        if (session) {
+          const restoredMessages = session.messages.filter((message) => !message.parts.some((part) => (
+            part.type === "tool-commit_source"
+            && (part.state === "input-available" || part.state === "input-streaming")
+          )));
+          sourceSnapshotsRef.current = session.sourceSnapshots;
+          setMessages(restoredMessages);
+          setSource(session.source);
+          const restoredEntry = VERSION_OPTIONS.find((item) => item.id === session.version);
+          if (session.version !== initialVersionRef.current) {
+            setPack(null);
+            packRef.current = null;
+            setPackStatus(restoredEntry && !restoredEntry.experimental ? "loading" : "error");
+            setPackError(restoredEntry && !restoredEntry.experimental ? "" : `${session.version} 的完整方块版本包尚未发布`);
+          }
+          setVersion(session.version);
+          if (packRef.current?.gameVersion === session.version) {
+            void runWith(session.source, packRef.current);
+          } else if (restoredEntry && !restoredEntry.experimental) {
+            restoredSourceToRunRef.current = session.source;
+          }
+          setNotice(`已恢复本地 Agent 会话 · ${restoredMessages.length} 条消息`);
+        }
+        persistenceReadyRef.current = true;
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        persistenceReadyRef.current = true;
+        setNotice(`无法恢复本地 Agent 会话：${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runWith, setMessages]);
+
+  useEffect(() => {
+    if (!persistenceReadyRef.current) return;
+    if (persistenceTimerRef.current) clearTimeout(persistenceTimerRef.current);
+    persistenceTimerRef.current = setTimeout(() => {
+      void saveAgentSession({
+        messages,
+        source,
+        version,
+        sourceSnapshots: sourceSnapshotsRef.current,
+      }).catch((error) => {
+        setNotice(`Agent 会话持久化失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, 250);
+    return () => {
+      if (persistenceTimerRef.current) clearTimeout(persistenceTimerRef.current);
+    };
+  }, [messages, source, version]);
+
+  const startNewConversation = async () => {
+    await cancelAgentRun("正在结束当前 Agent 运行…");
+    sourceSnapshotsRef.current = {};
     setMessages([]);
     setPrompt("");
     setAttachments([]);
     setEditingMessageId(null);
+    setAgentRun({ id: null, status: "idle", attempt: 0, maxAttempts: 1 });
     setNotice("已开启新对话 · 当前建筑源码与预览保持不变");
   };
 
@@ -526,7 +846,7 @@ export function BuilderWorkbench() {
             <div className="panel-heading-actions">
               <button
                 className="new-chat-button"
-                onClick={startNewConversation}
+                onClick={() => void startNewConversation()}
                 title="开启新对话（保留当前建筑）"
                 aria-label="开启新对话（保留当前建筑）"
               >
@@ -538,6 +858,24 @@ export function BuilderWorkbench() {
               </button>
             </div>
           </div>
+
+          {agentRun.status !== "idle" && (
+            <div className={`agent-run-state ${agentRun.status}`} role="status" aria-live="polite">
+              <span className="status-dot" />
+              <span>
+                {agentRun.status === "generating" && "Agent 正在生成候选源码"}
+                {agentRun.status === "validating" && `Agent 正在完整校验 ${agentRun.attempt}/${agentRun.maxAttempts}`}
+                {agentRun.status === "repairing" && `Agent 正在修正 ${agentRun.attempt}/${agentRun.maxAttempts}`}
+                {agentRun.status === "succeeded" && `Agent 已验证成功（第 ${agentRun.attempt} 次提交）`}
+                {agentRun.status === "exhausted" && `Agent 未收敛（已用 ${agentRun.attempt}/${agentRun.maxAttempts} 次）`}
+                {agentRun.status === "failed" && "Agent 运行失败"}
+                {agentRun.status === "cancelled" && "Agent 运行已取消"}
+              </span>
+              {(chatStatus === "submitted" || chatStatus === "streaming" || running) && (
+                <button type="button" onClick={() => void cancelAgentRun()}><Square size={10} />停止</button>
+              )}
+            </div>
+          )}
 
           <Conversation className="conversation">
             <ConversationContent className="conversation-content">
@@ -613,19 +951,12 @@ export function BuilderWorkbench() {
                         {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
                         {message.parts.map((part, index) => {
                           if (part.type !== "tool-commit_source") return null;
-                          const output = "output" in part ? part.output as {
-                            accepted?: boolean;
-                            error?: string;
-                            validation?: {
-                              blockCount?: number;
-                              paletteSize?: number;
-                              size?: number[];
-                              declaredVersion?: string;
-                              regionCount?: number;
-                              operationCount?: number;
-                            };
-                          } | undefined : undefined;
+                          const parsedOutput = "output" in part
+                            ? commitSourceOutputSchema.safeParse(part.output)
+                            : null;
+                          const output = parsedOutput?.success ? parsedOutput.data : undefined;
                           const accepted = output?.accepted;
+                          const terminalFailure = accepted === false && output?.terminal === true;
                           const validationSummary = output?.validation?.blockCount !== undefined
                             ? `${output.validation.blockCount.toLocaleString()} 方块 · ${output.validation.paletteSize} 种状态 · ${output.validation.size?.join("×")}`
                             : output?.validation
@@ -636,13 +967,27 @@ export function BuilderWorkbench() {
                               <ToolHeader
                                 type={part.type}
                                 state={part.state}
-                                title={accepted === true ? "Agent 预检通过" : accepted === false ? "Agent 收到错误并继续修正" : "Agent 正在预检源码"}
+                                title={accepted === true
+                                  ? "Agent 完整校验通过"
+                                  : terminalFailure
+                                    ? "Agent 修正未收敛"
+                                    : accepted === false
+                                      ? "Agent 收到错误并继续修正"
+                                      : "Agent 正在校验源码"}
+                                statusLabel={accepted === true ? "Validated" : terminalFailure ? "Failed" : accepted === false ? "Retrying" : undefined}
+                                statusVariant={accepted === true ? "success" : terminalFailure ? "error" : accepted === false ? "warning" : "default"}
                               />
                               <ToolContent>
                                 <div className="change-summary">
                                   {accepted === false ? <CircleAlert size={16} /> : <FileCode2 size={16} />}
                                   <div>
-                                    <strong>{accepted === true ? "完整源码已通过 Worker 安全预检" : accepted === false ? "本次提交未通过" : "正在检查源码结构与安全规则"}</strong>
+                                    <strong>{accepted === true
+                                      ? "完整源码已通过 AST、QuickJS 与版本注册表校验"
+                                      : terminalFailure
+                                        ? "已达到修正上限，本次运行失败"
+                                        : accepted === false
+                                          ? "本次提交未通过，错误已回传给模型"
+                                          : "正在执行 AST、QuickJS 与版本注册表校验"}</strong>
                                     <span>
                                       {output?.error ?? validationSummary}
                                     </span>
@@ -659,7 +1004,7 @@ export function BuilderWorkbench() {
               })}
 
               {(chatStatus === "submitted" || chatStatus === "streaming") && (
-                <div className="thinking-row"><LoaderCircle size={14} className="spin" /> 正在查询方块状态并编写结构…</div>
+                <div className="thinking-row"><LoaderCircle size={14} className="spin" /> Agent 正在生成、验证或依据工具结果修正…</div>
               )}
               {chatError && <div className="chat-error">AI 请求失败：{chatError.message}</div>}
             </ConversationContent>
@@ -716,7 +1061,11 @@ export function BuilderWorkbench() {
                 ><ImagePlus size={14} /></button>
                 <span><Zap size={12} /> {modelSettings.capabilities.vision ? "支持视觉输入" : "版本上下文已附带"}</span>
               </div>
-              <button onClick={() => void submitPrompt()} disabled={!prompt.trim() || chatStatus === "streaming" || chatStatus === "submitted"} aria-label="发送消息"><Send size={15} /></button>
+              {(chatStatus === "streaming" || chatStatus === "submitted" || running) ? (
+                <button onClick={() => void cancelAgentRun()} aria-label="停止 Agent"><Square size={14} /></button>
+              ) : (
+                <button onClick={() => void submitPrompt()} disabled={!prompt.trim()} aria-label="发送消息"><Send size={15} /></button>
+              )}
             </div>
           </div>
         </aside>

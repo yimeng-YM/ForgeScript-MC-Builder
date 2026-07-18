@@ -65,6 +65,28 @@ test("rejects malformed model catalog requests before contacting a provider", as
   assert.match(result.error, /模型配置无效/);
 });
 
+test("rejects malformed chat message histories with a 400 response", async () => {
+  const response = await fetchWorker("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [null] }),
+  });
+  assert.equal(response.status, 400);
+  const result = await response.json();
+  assert.match(result.error, /Invalid UI message history/);
+});
+
+test("rejects invalid chat JSON without raising a server error", async () => {
+  const response = await fetchWorker("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{",
+  });
+  assert.equal(response.status, 400);
+  const result = await response.json();
+  assert.match(result.error, /Invalid JSON/);
+});
+
 test("ships generated multi-version profile packs", async () => {
   const catalog = JSON.parse(await readFile(new URL("../public/version-packs/catalog.json", import.meta.url), "utf8"));
   assert.equal(catalog.format, 1);

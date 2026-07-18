@@ -13,6 +13,7 @@ import {
   PROVIDER_PRESETS,
   saveModelProfiles,
 } from "../lib/ai/model-settings.ts";
+import { latestCommitOutput } from "../lib/ai/agent-protocol.ts";
 import { preflightBuilderSource } from "../lib/ai/source-preflight.ts";
 import { DEFAULT_SOURCE, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
@@ -162,6 +163,56 @@ test("preflights agent source without requiring the QuickJS WASM runtime", () =>
   );
   assert.equal(malformed.accepted, false);
   assert.equal(malformed.accepted ? "" : malformed.stage, "syntax");
+
+  const regexLiteral = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, ({ world, block }) => { const region = world.region("main"); const closing = /[)]/; if (closing.test(")")) region.set([0, 0, 0], block("minecraft:stone")); });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(regexLiteral.accepted, true, "regular expressions must be parsed as JavaScript, not brackets");
+
+  const unsafeTemplateInterpolation = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, () => { const value = `${fetch("https://example.com")}`; });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(unsafeTemplateInterpolation.accepted, false);
+  assert.equal(unsafeTemplateInterpolation.accepted ? "" : unsafeTemplateInterpolation.stage, "security");
+
+  const unsafeGlobalAccess = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, () => { globalThis.fetch("https://example.com"); });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(unsafeGlobalAccess.accepted, false);
+  assert.equal(unsafeGlobalAccess.accepted ? "" : unsafeGlobalAccess.stage, "security");
+
+  const missingRegionNamespace = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, ({ world }) => { const region = world.region("main"); region.set([0, 0, 0], "stone"); });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(missingRegionNamespace.accepted, false);
+  assert.match(missingRegionNamespace.accepted ? "" : missingRegionNamespace.error, /minecraft:stone/);
+});
+
+test("starts a fresh agent run after a new user message", () => {
+  const acceptedAssistant = {
+    id: "assistant-1",
+    role: "assistant",
+    parts: [{
+      type: "tool-commit_source",
+      toolCallId: "call-1",
+      state: "output-available",
+      input: { source: "mc.build({ version: '1.21.11' }, () => {});", summary: "ok", version: "1.21.11" },
+      output: { accepted: true, terminal: true },
+    }],
+  };
+  assert.equal(latestCommitOutput([acceptedAssistant])?.accepted, true);
+  assert.equal(latestCommitOutput([
+    acceptedAssistant,
+    { id: "user-2", role: "user", parts: [{ type: "text", text: "再建一座塔" }] },
+  ]), null);
 });
 
 test("executes generated JavaScript inside the controlled Building SDK", async () => {

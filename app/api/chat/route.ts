@@ -2,8 +2,9 @@ import {
   convertToModelMessages,
   createUIMessageStream,
   createUIMessageStreamResponse,
-  stepCountIs,
+  safeValidateUIMessages,
   streamText,
+  tool,
   type FileUIPart,
   type UIMessage,
 } from "ai";
@@ -13,17 +14,29 @@ import {
   modelSettingsSchema,
   type ModelSettings,
 } from "@/lib/ai/model-settings";
+import {
+  commitSourceInputSchema,
+  commitSourceOutputSchema,
+  latestCommitOutput,
+  type BuilderUIMessage,
+} from "@/lib/ai/agent-protocol";
 import { publicModelError, resolveModel } from "@/lib/ai/provider";
-import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { sourceForPrompt } from "@/lib/minecraft/demo-source";
 
 export const runtime = "edge";
 
 const requestSchema = z.object({
-  messages: z.array(z.custom<UIMessage>()),
-  version: z.string().default("1.21.11"),
+  messages: z.array(z.unknown()).min(1).max(100),
+  version: z.string().min(1).max(40).default("1.21.11"),
   source: z.string().max(80_000).optional(),
   settings: modelSettingsSchema.default(DEFAULT_MODEL_SETTINGS),
+});
+
+const commitSourceTool = tool({
+  description: "提交完整 JavaScript，由浏览器执行 AST 预检、QuickJS 沙箱和版本方块注册表校验；失败时根据结果继续修正。",
+  inputSchema: commitSourceInputSchema,
+  outputSchema: commitSourceOutputSchema,
+  strict: true,
 });
 
 function getLatestPrompt(messages: UIMessage[]): string {
@@ -53,19 +66,37 @@ function imageInputError(messages: UIMessage[], visionEnabled: boolean) {
   return "";
 }
 
+function localFinalResponse(messages: UIMessage[], accepted: boolean, error?: string) {
+  const textId = `text-${crypto.randomUUID()}`;
+  const stream = createUIMessageStream({
+    originalMessages: messages,
+    execute: ({ writer }) => {
+      writer.write({ type: "start-step" });
+      writer.write({ type: "text-start", id: textId });
+      writer.write({
+        type: "text-delta",
+        id: textId,
+        delta: accepted
+          ? "本地演示生成已通过 AST 预检、QuickJS 沙箱与当前版本方块注册表校验。"
+          : `本地演示生成未通过完整校验，且本地生成器不具备模型修正能力。${error ? `\n\n${error}` : ""}`,
+      });
+      writer.write({ type: "text-end", id: textId });
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
+}
+
 function localResponse(messages: UIMessage[], version: string) {
+  const latestResult = latestCommitOutput(messages);
+  if (latestResult) return localFinalResponse(messages, latestResult.accepted, latestResult.error);
   const prompt = getLatestPrompt(messages);
   const source = sourceForPrompt(prompt, version);
-  const preflight = preflightBuilderSource(
-    source,
-    version,
-    DEFAULT_MODEL_SETTINGS.builder.maxBuildBlocks,
-  );
   const toolCallId = `local-${crypto.randomUUID()}`;
   const textId = `text-${crypto.randomUUID()}`;
   const stream = createUIMessageStream({
     originalMessages: messages,
     execute: ({ writer }) => {
+      writer.write({ type: "start-step" });
       writer.write({ type: "text-start", id: textId });
       writer.write({
         type: "text-delta",
@@ -79,11 +110,6 @@ function localResponse(messages: UIMessage[], version: string) {
         toolCallId,
         toolName: "commit_source",
         input: { source, summary: "生成完整建筑源码", version },
-      });
-      writer.write({
-        type: "tool-output-available",
-        toolCallId,
-        output: preflight,
       });
     },
   });
@@ -129,6 +155,13 @@ function builderInstructions(version: string, source: string | undefined, settin
   const extra = settings.builder.extraInstructions.trim()
     ? `\n用户的额外生成偏好：\n${settings.builder.extraInstructions.trim()}`
     : "";
+  const agentLoopRule = [
+    "AGENT TOOL LOOP:",
+    "commit_source is executed by the browser and performs both AST security preflight and real QuickJS plus Minecraft registry validation.",
+    "If accepted=false and terminal is not true, read the exact error, repair the complete source, and call commit_source again.",
+    "If accepted=true, do not call commit_source again; provide a concise final summary.",
+    "If terminal=true, do not call commit_source again; clearly report that the run did not converge.",
+  ].join(" ");
 
   return `你是 Minecraft Java Edition 建筑工程师，也是一个会使用工具验证自己工作的 Agent。当前目标版本是 ${version}。
 你只能生成受控 Building SDK 源码，不得使用 fetch、DOM、文件、模块导入或计时器。
@@ -151,17 +184,47 @@ mc.build(metadata, ({ world, block, redstone }) => {
   region.pillar([x, y, z], height, blockState)
   region.replace([x1, y1, z1], [x2, y2, z2], matchId, blockState)
 })。
-完成后必须调用 commit_source 提交完整 JavaScript。commit_source 会先进行与 Worker 兼容的安全预检，包括源码结构、安全规则、目标版本和 SDK 调用；如果返回 accepted=false，你必须阅读错误、修改完整源码并再次调用，直到通过或达到步数上限。预检通过后，浏览器会在 QuickJS 隔离环境中真实执行源码并校验版本方块注册表；二阶段错误会自动回传给你继续修正。不要声称只经过预检的源码已经完成运行验证。聊天正文只简要说明结果、验证结果、精度假设和需要用户注意的限制，不粘贴源码。不要输出私有思维链；只提供简洁、可核验的推理摘要和工具执行轨迹。
+完成后必须调用 commit_source 提交完整 JavaScript。commit_source 会在浏览器中依次进行 AST 安全预检、QuickJS 隔离执行和目标版本方块注册表校验；如果返回 accepted=false 且 terminal 不是 true，你必须阅读错误、修改完整源码并再次调用。只有 accepted=true 才代表完整验证通过；terminal=true 表示本次运行已经停止，不得继续调用工具。聊天正文只简要说明结果、验证结果、精度假设和需要用户注意的限制，不粘贴源码。不要输出私有思维链；只提供简洁、可核验的推理摘要和工具执行轨迹。
+${agentLoopRule}
 当前源码如下：
 ${source ?? "// empty project"}${extra}`;
 }
 
 export async function POST(request: Request) {
-  const parsed = requestSchema.safeParse(await request.json());
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 48 * 1024 * 1024) {
+    return Response.json({ error: "Chat request is too large" }, { status: 413 });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid JSON request body" }, { status: 400 });
+  }
+  const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
     return Response.json({ error: "Invalid chat request" }, { status: 400 });
   }
-  const { messages, version, source, settings } = parsed.data;
+  const validated = await safeValidateUIMessages<BuilderUIMessage>({
+    messages: parsed.data.messages,
+    tools: { commit_source: commitSourceTool },
+  });
+  if (!validated.success) {
+    return Response.json({ error: "Invalid UI message history" }, { status: 400 });
+  }
+  const messages = validated.data;
+  const { version, source, settings } = parsed.data;
+  const totalTextLength = messages.reduce(
+    (total, message) => total + message.parts.reduce(
+      (messageTotal, part) => messageTotal + (part.type === "text" ? part.text.length : 0),
+      0,
+    ),
+    0,
+  );
+  if (totalTextLength > 500_000) {
+    return Response.json({ error: "Chat text history is too large" }, { status: 413 });
+  }
   const inputError = imageInputError(messages, settings.capabilities.vision);
   if (inputError) return Response.json({ error: inputError }, { status: 400 });
   let resolved;
@@ -181,11 +244,17 @@ export async function POST(request: Request) {
     return localResponse(messages, version);
   }
 
-  const modelMessages = await convertToModelMessages(messages);
+  const previousCommit = latestCommitOutput(messages);
+  const shouldFinalize = previousCommit?.accepted === true || previousCommit?.terminal === true;
+  const modelMessages = await convertToModelMessages(messages, {
+    tools: { commit_source: commitSourceTool },
+  });
   const result = streamText({
     model: resolved.model,
     messages: modelMessages,
-    instructions: builderInstructions(version, source, settings),
+    instructions: `${builderInstructions(version, source, settings)}\n${shouldFinalize
+      ? "The browser has returned a terminal commit_source result. Do not call tools. Summarize the verified success or non-convergent failure accurately."
+      : "You must finish this turn by calling commit_source with the complete candidate source."}`,
     temperature: settings.generation.topP === null ? settings.generation.temperature ?? undefined : undefined,
     topP: settings.generation.topP ?? undefined,
     maxOutputTokens: settings.generation.maxOutputTokens,
@@ -196,32 +265,10 @@ export async function POST(request: Request) {
     reasoning: settings.generation.reasoningEffort === "off"
       ? undefined
       : settings.generation.reasoningEffort,
-    tools: {
-      commit_source: {
-        description: "提交完整 JavaScript 并执行 Worker 安全预检；失败时根据返回错误继续修正，成功后由浏览器沙箱进行二阶段执行验证",
-        inputSchema: z.object({
-          source: z.string().max(80_000),
-          summary: z.string().max(500),
-          version: z.string(),
-        }),
-        execute: async ({ source: nextSource, summary, version: claimedVersion }) => {
-          if (claimedVersion !== version) {
-            return {
-              accepted: false,
-              stage: "metadata",
-              error: `源码声明版本 ${claimedVersion}，但当前目标版本是 ${version}`,
-            };
-          }
-          const preflight = preflightBuilderSource(
-            nextSource,
-            version,
-            settings.builder.maxBuildBlocks,
-          );
-          return preflight.accepted ? { ...preflight, summary } : preflight;
-        },
-      },
-    },
-    stopWhen: stepCountIs(settings.generation.maxSteps),
+    ...(shouldFinalize ? {} : {
+      tools: { commit_source: commitSourceTool },
+      toolChoice: "required" as const,
+    }),
   });
 
   return result.toUIMessageStreamResponse({ originalMessages: messages });
