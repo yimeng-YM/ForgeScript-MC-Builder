@@ -51,9 +51,6 @@ export default defineConfig(async ({ command }) => {
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
-    ssr: {
-      external: ["class-variance-authority", "clsx", "tailwind-merge"],
-    },
     plugins: [
       vinext(),
       sites(),

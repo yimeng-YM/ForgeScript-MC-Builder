@@ -1,7 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  serverExternalPackages: [
+    "class-variance-authority",
+    "clsx",
+    "tailwind-merge",
+  ],
 };
 
 export default nextConfig;
