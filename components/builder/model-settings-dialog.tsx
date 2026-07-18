@@ -4,25 +4,33 @@ import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "radix-ui";
 import {
   Blocks,
+  BrainCircuit,
   Check,
   ChevronRight,
   CircleAlert,
+  CopyPlus,
   Eye,
   EyeOff,
   KeyRound,
   LoaderCircle,
+  Plus,
+  RefreshCw,
   ServerCog,
   ShieldCheck,
   SlidersHorizontal,
   TestTube2,
+  Trash2,
   X,
 } from "lucide-react";
 import {
+  createModelProfile,
+  DEFAULT_MODEL_SETTINGS,
   MAX_GENERATION_TIMEOUT_MS,
   MAX_SCRIPT_TIMEOUT_MS,
   getProviderPreset,
   modelSettingsSchema,
   PROVIDER_PRESETS,
+  type ModelProfile,
   type ModelSettings,
 } from "@/lib/ai/model-settings";
 
@@ -36,9 +44,17 @@ type TestState =
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  value: ModelSettings;
-  onSave: (settings: ModelSettings) => void;
+  profiles: ModelProfile[];
+  activeProfileId: string;
+  onSave: (profiles: ModelProfile[], activeProfileId: string) => void;
 };
+
+type CatalogModel = { id: string; name: string; vision: boolean; provider?: string };
+type CatalogState =
+  | { status: "idle"; models: CatalogModel[] }
+  | { status: "loading"; models: CatalogModel[] }
+  | { status: "success"; models: CatalogModel[]; source: string }
+  | { status: "error"; models: CatalogModel[]; message: string };
 
 function parseHeaders(text: string) {
   if (!text.trim()) return {};
@@ -90,24 +106,34 @@ function ToggleRow({
   );
 }
 
-export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props) {
+export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfileId, onSave }: Props) {
   const [tab, setTab] = useState<SettingsTab>("provider");
-  const [draft, setDraft] = useState(value);
+  const initialProfile = profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+  const [profileDrafts, setProfileDrafts] = useState(profiles);
+  const [selectedProfileId, setSelectedProfileId] = useState(initialProfile.id);
+  const [profileName, setProfileName] = useState(initialProfile.name);
+  const [draft, setDraft] = useState(initialProfile.settings);
   const [headersText, setHeadersText] = useState("{}");
   const [showSecret, setShowSecret] = useState(false);
   const [formError, setFormError] = useState("");
   const [testState, setTestState] = useState<TestState>({ status: "idle" });
+  const [catalogState, setCatalogState] = useState<CatalogState>({ status: "idle", models: [] });
 
   useEffect(() => {
     if (!open) return;
     const frame = window.requestAnimationFrame(() => {
-      setDraft(value);
-      setHeadersText(JSON.stringify(value.customHeaders, null, 2));
+      const active = profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+      setProfileDrafts(profiles);
+      setSelectedProfileId(active.id);
+      setProfileName(active.name);
+      setDraft(active.settings);
+      setHeadersText(JSON.stringify(active.settings.customHeaders, null, 2));
       setFormError("");
       setTestState({ status: "idle" });
+      setCatalogState({ status: "idle", models: [] });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [open, value]);
+  }, [activeProfileId, open, profiles]);
 
   const preset = useMemo(() => getProviderPreset(draft.presetId), [draft.presetId]);
 
@@ -123,6 +149,7 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
       authMode: next.authMode,
       apiKey: "",
       customHeaders: {},
+      capabilities: { vision: next.visionDefault ?? false },
     }));
     setHeadersText("{}");
     setFormError("");
@@ -136,6 +163,114 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
       throw new Error(parsed.error.issues[0]?.message ?? "模型配置无效");
     }
     return parsed.data;
+  };
+
+  const snapshotProfiles = (settings = validatedDraft()) => profileDrafts.map((profile) =>
+    profile.id === selectedProfileId
+      ? { ...profile, name: profileName.trim() || "未命名配置", settings, updatedAt: Date.now() }
+      : profile,
+  );
+
+  const switchProfile = (profileId: string) => {
+    try {
+      const nextProfiles = snapshotProfiles();
+      const next = nextProfiles.find((profile) => profile.id === profileId);
+      if (!next) return;
+      setProfileDrafts(nextProfiles);
+      setSelectedProfileId(next.id);
+      setProfileName(next.name);
+      setDraft(next.settings);
+      setHeadersText(JSON.stringify(next.settings.customHeaders, null, 2));
+      setCatalogState({ status: "idle", models: [] });
+      setFormError("");
+      setTestState({ status: "idle" });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const duplicateProfile = () => {
+    if (profileDrafts.length >= 20) {
+      setFormError("最多保存 20 个模型配置");
+      return;
+    }
+    try {
+      const settings = validatedDraft();
+      const currentProfiles = snapshotProfiles(settings);
+      const next = createModelProfile(settings, `${profileName.trim() || "模型配置"} 副本`);
+      setProfileDrafts([...currentProfiles, next]);
+      setSelectedProfileId(next.id);
+      setProfileName(next.name);
+      setDraft(next.settings);
+      setHeadersText(JSON.stringify(next.settings.customHeaders, null, 2));
+      setCatalogState({ status: "idle", models: [] });
+      setFormError("");
+      setTestState({ status: "idle" });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const newProfile = () => {
+    if (profileDrafts.length >= 20) {
+      setFormError("最多保存 20 个模型配置");
+      return;
+    }
+    try {
+      const currentProfiles = snapshotProfiles();
+      const next = createModelProfile(DEFAULT_MODEL_SETTINGS, "新模型配置");
+      setProfileDrafts([...currentProfiles, next]);
+      setSelectedProfileId(next.id);
+      setProfileName(next.name);
+      setDraft(next.settings);
+      setHeadersText(JSON.stringify(next.settings.customHeaders, null, 2));
+      setCatalogState({ status: "idle", models: [] });
+      setFormError("");
+      setTestState({ status: "idle" });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const deleteProfile = () => {
+    if (profileDrafts.length <= 1) return;
+    const nextProfiles = profileDrafts.filter((profile) => profile.id !== selectedProfileId);
+    const next = nextProfiles[0];
+    setProfileDrafts(nextProfiles);
+    setSelectedProfileId(next.id);
+    setProfileName(next.name);
+    setDraft(next.settings);
+    setHeadersText(JSON.stringify(next.settings.customHeaders, null, 2));
+    setCatalogState({ status: "idle", models: [] });
+    setFormError("");
+    setTestState({ status: "idle" });
+  };
+
+  const fetchModels = async () => {
+    setFormError("");
+    setCatalogState((current) => ({ status: "loading", models: current.models }));
+    try {
+      const settings = validatedDraft();
+      const response = await fetch("/api/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings }),
+      });
+      const result = await response.json() as {
+        ok?: boolean;
+        error?: string;
+        source?: string;
+        models?: CatalogModel[];
+      };
+      if (!response.ok || !result.ok || !result.models) throw new Error(result.error || "获取模型列表失败");
+      setCatalogState({ status: "success", models: result.models, source: result.source ?? "供应商" });
+    } catch (error) {
+      setCatalogState({
+        status: "error",
+        models: [],
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   };
 
   const testConnection = async () => {
@@ -169,7 +304,7 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
     setFormError("");
     try {
       const settings = validatedDraft();
-      onSave(settings);
+      onSave(snapshotProfiles(settings), selectedProfileId);
       onOpenChange(false);
     } catch (error) {
       setFormError(error instanceof Error ? error.message : String(error));
@@ -217,7 +352,26 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                     <span className={`settings-protocol ${draft.provider}`}>{draft.provider.replace("openai-compatible", "OPENAI COMPATIBLE")}</span>
                   </div>
 
-                  <Field label="供应商预设" hint={preset.description}>
+                  <div className="profile-manager">
+                    <label>
+                      <span>已保存配置</span>
+                      <select value={selectedProfileId} onChange={(event) => switchProfile(event.target.value)}>
+                        {profileDrafts.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>配置名称</span>
+                      <input value={profileName} maxLength={60} onChange={(event) => setProfileName(event.target.value)} />
+                    </label>
+                    <div className="profile-actions">
+                      <button type="button" onClick={newProfile} disabled={profileDrafts.length >= 20} title="创建空白模型预设"><Plus size={14} />新建</button>
+                      <button type="button" onClick={duplicateProfile} disabled={profileDrafts.length >= 20} title="将当前设置保存为另一个预设"><CopyPlus size={14} />另存为</button>
+                      <button type="button" className="danger" onClick={deleteProfile} disabled={profileDrafts.length <= 1} title="删除当前配置"><Trash2 size={14} /></button>
+                    </div>
+                    <p className="profile-manager-hint">新建或另存为后，请点击底部“保存预设”完成持久化；最多保存 20 个。</p>
+                  </div>
+
+                  <Field label="供应商模板" hint={preset.description}>
                     <select value={draft.presetId} onChange={(event) => applyPreset(event.target.value)}>
                       <optgroup label="自动与网关">
                         {PROVIDER_PRESETS.filter((item) => ["auto", "vercel-gateway"].includes(item.presetId)).map((item) => <option key={item.presetId} value={item.presetId}>{item.label}</option>)}
@@ -237,7 +391,32 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
 
                   <div className="settings-grid two">
                     <Field label="模型 ID" hint={draft.provider === "gateway" || draft.provider === "auto" ? "Gateway 使用 provider/model 格式" : "必须与供应商控制台中的模型名称一致"}>
-                      <input value={draft.model} onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))} spellCheck={false} />
+                      <div className="model-id-control">
+                        <input value={draft.model} onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))} spellCheck={false} />
+                        <button type="button" onClick={() => void fetchModels()} disabled={catalogState.status === "loading"}>
+                          {catalogState.status === "loading" ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
+                          获取列表
+                        </button>
+                      </div>
+                      {catalogState.models.length > 0 && (
+                        <select
+                          className="model-catalog"
+                          value={catalogState.models.some((model) => model.id === draft.model) ? draft.model : ""}
+                          onChange={(event) => {
+                            const model = catalogState.models.find((item) => item.id === event.target.value);
+                            if (!model) return;
+                            setDraft((current) => ({
+                              ...current,
+                              model: model.id,
+                              capabilities: { ...current.capabilities, vision: model.vision },
+                            }));
+                          }}
+                        >
+                          <option value="">从 {catalogState.status === "success" ? catalogState.source : "目录"} 选择（{catalogState.models.length}）</option>
+                          {catalogState.models.map((model) => <option key={model.id} value={model.id}>{model.name === model.id ? model.id : `${model.name} · ${model.id}`}{model.vision ? " · 视觉" : ""}</option>)}
+                        </select>
+                      )}
+                      {catalogState.status === "error" && <small className="model-catalog-error">{catalogState.message}</small>}
                     </Field>
                     {draft.provider === "openai-compatible" && (
                       <Field label="供应商标识" hint="用于区分请求元数据，仅允许简短名称">
@@ -267,6 +446,13 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                     onChange={(rememberApiKey) => setDraft((current) => ({ ...current, rememberApiKey }))}
                   />
 
+                  <ToggleRow
+                    checked={draft.capabilities.vision}
+                    title="启用视觉输入"
+                    description="仅为确认支持图片理解的模型开启；开启后对话框可上传 PNG、JPEG、WebP 或 GIF。"
+                    onChange={(vision) => setDraft((current) => ({ ...current, capabilities: { ...current.capabilities, vision } }))}
+                  />
+
                   {!(["auto", "gateway"] as string[]).includes(draft.provider) && (
                     <div className={`settings-grid ${draft.provider === "openai-compatible" ? "two" : ""}`}>
                       {draft.provider === "openai-compatible" && (
@@ -291,6 +477,7 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                 <section className="settings-section" aria-labelledby="generation-settings-title">
                   <div className="settings-section-heading"><div><span>INFERENCE</span><h2 id="generation-settings-title">生成参数</h2></div></div>
                   <div className="settings-callout"><SlidersHorizontal size={15} /><span>建筑脚本偏向确定性输出。Top P 启用时会自动停用 Temperature，避免重复采样控制。</span></div>
+                  <div className="settings-callout"><BrainCircuit size={15} /><span>推理强度控制供应商的 reasoning 输出。界面展示模型提供的推理摘要和工具轨迹，不展示私有内部思维链。</span></div>
                   <div className="settings-grid two">
                     <Field label="Temperature" hint="越低越稳定；建筑与红石建议 0–0.3">
                       <input type="number" min="0" max="2" step="0.05" disabled={draft.generation.topP !== null} value={draft.generation.temperature ?? 0.2} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, temperature: Number(event.target.value) } }))} />
@@ -304,8 +491,16 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                     <Field label="最大输出 Token" hint="大型建筑脚本需要更高上限">
                       <input type="number" min="256" max="64000" step="256" value={draft.generation.maxOutputTokens} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxOutputTokens: Number(event.target.value) } }))} />
                     </Field>
-                    <Field label="工具调用步数" hint="允许模型修正并最终提交源码，范围 1–8">
-                      <input type="number" min="1" max="8" value={draft.generation.maxSteps} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxSteps: Number(event.target.value) } }))} />
+                    <Field label="Agent 最大步数" hint="每次沙箱拒绝后模型会读取错误并继续修正，范围 2–12">
+                      <input type="number" min="2" max="12" value={draft.generation.maxSteps} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxSteps: Number(event.target.value) } }))} />
+                    </Field>
+                    <Field label="推理摘要强度" hint="并非所有供应商都支持；关闭可减少延迟和 Token">
+                      <select value={draft.generation.reasoningEffort} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, reasoningEffort: event.target.value as ModelSettings["generation"]["reasoningEffort"] } }))}>
+                        <option value="off">关闭</option>
+                        <option value="low">低</option>
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                      </select>
                     </Field>
                     <Field label="失败重试次数" hint="不含模型主动工具调用">
                       <input type="number" min="0" max="5" value={draft.generation.maxRetries} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxRetries: Number(event.target.value) } }))} />
@@ -339,6 +534,9 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
                     <ToggleRow checked={draft.builder.preserveExisting} title="保留现有结构" description="后续对话只修改相关源码；关闭后允许整体重构。" onChange={(preserveExisting) => setDraft((current) => ({ ...current, builder: { ...current.builder, preserveExisting } }))} />
                     <ToggleRow checked={draft.builder.autoRunAfterGeneration} title="生成后自动运行" description="AI 提交源码后立即进入 QuickJS 沙箱、校验并刷新 3D 预览。" onChange={(autoRunAfterGeneration) => setDraft((current) => ({ ...current, builder: { ...current.builder, autoRunAfterGeneration } }))} />
                   </div>
+                  <Field label="二阶段自动修正次数" hint="Agent 沙箱通过后若版本方块注册表仍报错，前端会把完整诊断再次交回模型；0 表示关闭">
+                    <input type="number" min="0" max="6" value={draft.builder.maxAutoFixAttempts} onChange={(event) => setDraft((current) => ({ ...current, builder: { ...current.builder, maxAutoFixAttempts: Number(event.target.value) } }))} />
+                  </Field>
                   <Field label="最大结构方块数" hint="同时作为模型约束；实际执行仍受沙箱硬限制">
                     <input type="number" min="1000" max="500000" step="1000" value={draft.builder.maxBuildBlocks} onChange={(event) => setDraft((current) => ({ ...current, builder: { ...current.builder, maxBuildBlocks: Number(event.target.value) } }))} />
                   </Field>
@@ -359,13 +557,13 @@ export function ModelSettingsDialog({ open, onOpenChange, value, onSave }: Props
               {testState.status === "success" && <><Check size={14} /> {testState.message}</>}
               {testState.status === "error" && <><CircleAlert size={14} /> {testState.message}</>}
               {testState.status === "idle" && formError && <><CircleAlert size={14} /> {formError}</>}
-              {testState.status === "idle" && !formError && <><ShieldCheck size={14} /> 普通设置保存在本机；密钥只随模型请求发送到服务端。</>}
+              {testState.status === "idle" && !formError && <><ShieldCheck size={14} /> 当前有 {profileDrafts.length} 个预设草稿；保存后普通设置会保留在本机。</>}
             </div>
             <div className="settings-footer-actions">
-              <button className="test-model-button" onClick={() => void testConnection()} disabled={testState.status === "testing"}>
+              <button type="button" className="test-model-button" onClick={() => void testConnection()} disabled={testState.status === "testing"}>
                 {testState.status === "testing" ? <LoaderCircle size={14} className="spin" /> : <TestTube2 size={14} />}测试连接
               </button>
-              <button className="save-settings-button" onClick={save}><Check size={14} />保存设置</button>
+              <button type="button" className="save-settings-button" onClick={save}><Check size={14} />保存预设</button>
             </div>
           </footer>
         </Dialog.Content>

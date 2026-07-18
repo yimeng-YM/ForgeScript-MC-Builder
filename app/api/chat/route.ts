@@ -4,6 +4,7 @@ import {
   createUIMessageStreamResponse,
   stepCountIs,
   streamText,
+  type FileUIPart,
   type UIMessage,
 } from "ai";
 import { z } from "zod";
@@ -13,6 +14,7 @@ import {
   type ModelSettings,
 } from "@/lib/ai/model-settings";
 import { publicModelError, resolveModel } from "@/lib/ai/provider";
+import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { sourceForPrompt } from "@/lib/minecraft/demo-source";
 
 export const runtime = "edge";
@@ -33,9 +35,32 @@ function getLatestPrompt(messages: UIMessage[]): string {
     .join("\n");
 }
 
+function imageInputError(messages: UIMessage[], visionEnabled: boolean) {
+  const imageParts = messages.flatMap((message) =>
+    message.parts.filter((part): part is FileUIPart =>
+      part.type === "file" && part.mediaType.startsWith("image/"),
+    ),
+  );
+  if (imageParts.length === 0) return "";
+  if (!visionEnabled) return "当前模型配置未启用视觉输入，请在模型设置中开启后再上传图片";
+  if (imageParts.length > 12) return "单次对话最多保留 12 张参考图片";
+  for (const part of imageParts) {
+    if (!/^data:image\/(png|jpeg|webp|gif);base64,/i.test(part.url)) {
+      return "图片必须是 PNG、JPEG、WebP 或 GIF 本地上传内容";
+    }
+    if (part.url.length > 12_000_000) return "单张图片不能超过 8 MB";
+  }
+  return "";
+}
+
 function localResponse(messages: UIMessage[], version: string) {
   const prompt = getLatestPrompt(messages);
   const source = sourceForPrompt(prompt, version);
+  const preflight = preflightBuilderSource(
+    source,
+    version,
+    DEFAULT_MODEL_SETTINGS.builder.maxBuildBlocks,
+  );
   const toolCallId = `local-${crypto.randomUUID()}`;
   const textId = `text-${crypto.randomUUID()}`;
   const stream = createUIMessageStream({
@@ -58,7 +83,7 @@ function localResponse(messages: UIMessage[], version: string) {
       writer.write({
         type: "tool-output-available",
         toolCallId,
-        output: { accepted: true, sourceLength: source.length },
+        output: preflight,
       });
     },
   });
@@ -105,7 +130,7 @@ function builderInstructions(version: string, source: string | undefined, settin
     ? `\n用户的额外生成偏好：\n${settings.builder.extraInstructions.trim()}`
     : "";
 
-  return `你是 Minecraft Java Edition 建筑工程师。当前目标版本是 ${version}。
+  return `你是 Minecraft Java Edition 建筑工程师，也是一个会使用工具验证自己工作的 Agent。当前目标版本是 ${version}。
 你只能生成受控 Building SDK 源码，不得使用 fetch、DOM、文件、模块导入或计时器。
 坐标约定为 X 东、Y 上、Z 南。${detailInstruction(settings)}
 ${stateRule}
@@ -126,7 +151,7 @@ mc.build(metadata, ({ world, block, redstone }) => {
   region.pillar([x, y, z], height, blockState)
   region.replace([x1, y1, z1], [x2, y2, z2], matchId, blockState)
 })。
-完成后必须调用 commit_source 提交完整 JavaScript；聊天正文只简要说明结果、精度假设和需要用户注意的限制，不粘贴源码。
+完成后必须调用 commit_source 提交完整 JavaScript。commit_source 会先进行与 Worker 兼容的安全预检，包括源码结构、安全规则、目标版本和 SDK 调用；如果返回 accepted=false，你必须阅读错误、修改完整源码并再次调用，直到通过或达到步数上限。预检通过后，浏览器会在 QuickJS 隔离环境中真实执行源码并校验版本方块注册表；二阶段错误会自动回传给你继续修正。不要声称只经过预检的源码已经完成运行验证。聊天正文只简要说明结果、验证结果、精度假设和需要用户注意的限制，不粘贴源码。不要输出私有思维链；只提供简洁、可核验的推理摘要和工具执行轨迹。
 当前源码如下：
 ${source ?? "// empty project"}${extra}`;
 }
@@ -137,6 +162,8 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid chat request" }, { status: 400 });
   }
   const { messages, version, source, settings } = parsed.data;
+  const inputError = imageInputError(messages, settings.capabilities.vision);
+  if (inputError) return Response.json({ error: inputError }, { status: 400 });
   let resolved;
   try {
     resolved = resolveModel(settings);
@@ -146,7 +173,13 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  if (resolved.mode === "local" || !resolved.model) return localResponse(messages, version);
+  if (resolved.mode === "local" || !resolved.model) {
+    const hasImages = messages.some((message) => message.parts.some((part) => part.type === "file"));
+    if (hasImages) {
+      return Response.json({ error: "本地演示生成器不支持图片，请连接支持视觉输入的远程模型" }, { status: 400 });
+    }
+    return localResponse(messages, version);
+  }
 
   const modelMessages = await convertToModelMessages(messages);
   const result = streamText({
@@ -160,20 +193,32 @@ export async function POST(request: Request) {
     timeout: { totalMs: settings.generation.timeoutMs },
     abortSignal: request.signal,
     seed: settings.generation.seed ?? undefined,
-    reasoning: "medium", // 开启 AI SDK 7.0 支持的折叠式思维链，会在 API Stream 中传递 reasoning part
+    reasoning: settings.generation.reasoningEffort === "off"
+      ? undefined
+      : settings.generation.reasoningEffort,
     tools: {
       commit_source: {
-        description: "提交可在受控 Building SDK 沙箱中运行的完整 JavaScript 源码",
+        description: "提交完整 JavaScript 并执行 Worker 安全预检；失败时根据返回错误继续修正，成功后由浏览器沙箱进行二阶段执行验证",
         inputSchema: z.object({
           source: z.string().max(80_000),
           summary: z.string().max(500),
           version: z.string(),
         }),
-        execute: async ({ source: nextSource, summary }) => ({
-          accepted: true,
-          sourceLength: nextSource.length,
-          summary,
-        }),
+        execute: async ({ source: nextSource, summary, version: claimedVersion }) => {
+          if (claimedVersion !== version) {
+            return {
+              accepted: false,
+              stage: "metadata",
+              error: `源码声明版本 ${claimedVersion}，但当前目标版本是 ${version}`,
+            };
+          }
+          const preflight = preflightBuilderSource(
+            nextSource,
+            version,
+            settings.builder.maxBuildBlocks,
+          );
+          return preflight.accepted ? { ...preflight, summary } : preflight;
+        },
       },
     },
     stopWhen: stepCountIs(settings.generation.maxSteps),

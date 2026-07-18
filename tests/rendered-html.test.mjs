@@ -54,6 +54,17 @@ test("tests the default model connection without exposing a secret", async () =>
   assert.doesNotMatch(JSON.stringify(result), /apiKey|AI_GATEWAY_API_KEY/);
 });
 
+test("rejects malformed model catalog requests before contacting a provider", async () => {
+  const response = await fetchWorker("/api/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: {} }),
+  });
+  assert.equal(response.status, 400);
+  const result = await response.json();
+  assert.match(result.error, /模型配置无效/);
+});
+
 test("ships generated multi-version profile packs", async () => {
   const catalog = JSON.parse(await readFile(new URL("../public/version-packs/catalog.json", import.meta.url), "utf8"));
   assert.equal(catalog.format, 1);

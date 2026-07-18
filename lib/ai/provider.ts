@@ -21,7 +21,7 @@ export type ResolvedModel = {
   label: string;
 };
 
-function serverKeyFor(settings: ModelSettings) {
+export function serverKeyFor(settings: ModelSettings) {
   if (settings.provider === "gateway" || settings.provider === "auto") {
     return process.env.AI_GATEWAY_API_KEY ?? "";
   }
@@ -83,7 +83,7 @@ export function assertSafeBaseURL(rawURL: string) {
   return url.toString().replace(/\/$/, "");
 }
 
-function safeHeaders(settings: ModelSettings, apiKey: string) {
+export function safeHeaders(settings: ModelSettings, apiKey: string) {
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(settings.customHeaders)) {
     const normalized = name.trim().toLowerCase();
@@ -92,6 +92,17 @@ function safeHeaders(settings: ModelSettings, apiKey: string) {
   }
   if (apiKey && settings.authMode === "api-key") headers["api-key"] = apiKey;
   if (apiKey && settings.authMode === "x-api-key") headers["x-api-key"] = apiKey;
+  return headers;
+}
+
+export function resolvedApiKey(settings: ModelSettings) {
+  return settings.apiKey.trim() || serverKeyFor(settings);
+}
+
+export function modelDiscoveryHeaders(settings: ModelSettings) {
+  const apiKey = resolvedApiKey(settings);
+  const headers = safeHeaders(settings, apiKey);
+  if (apiKey && settings.authMode === "bearer") headers.Authorization = `Bearer ${apiKey}`;
   return headers;
 }
 

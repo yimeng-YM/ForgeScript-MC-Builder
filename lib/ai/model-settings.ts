@@ -10,6 +10,7 @@ export const providerKindSchema = z.enum([
 
 export const authModeSchema = z.enum(["bearer", "api-key", "x-api-key", "none"]);
 export const detailLevelSchema = z.enum(["concept", "balanced", "engineering"]);
+export const reasoningEffortSchema = z.enum(["off", "low", "medium", "high"]);
 
 export const DEFAULT_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 export const MAX_GENERATION_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
@@ -30,13 +31,17 @@ export const modelSettingsSchema = z.object({
   authMode: authModeSchema,
   customHeaders: customHeadersSchema,
   rememberApiKey: z.boolean(),
+  capabilities: z.object({
+    vision: z.boolean(),
+  }),
   generation: z.object({
     temperature: z.number().min(0).max(2).nullable(),
     topP: z.number().min(0).max(1).nullable(),
     maxOutputTokens: z.number().int().min(256).max(64_000),
     maxRetries: z.number().int().min(0).max(5),
     timeoutMs: z.number().int().min(5_000).max(MAX_GENERATION_TIMEOUT_MS),
-    maxSteps: z.number().int().min(1).max(8),
+    maxSteps: z.number().int().min(2).max(12),
+    reasoningEffort: reasoningEffortSchema,
     seed: z.number().int().min(0).max(2_147_483_647).nullable(),
   }),
   builder: z.object({
@@ -45,6 +50,7 @@ export const modelSettingsSchema = z.object({
     redstonePrecision: z.boolean(),
     preserveExisting: z.boolean(),
     autoRunAfterGeneration: z.boolean(),
+    maxAutoFixAttempts: z.number().int().min(0).max(6),
     maxBuildBlocks: z.number().int().min(1_000).max(500_000),
     executionTimeoutMs: z.number().int().min(1_000).max(MAX_SCRIPT_TIMEOUT_MS),
     extraInstructions: z.string().max(4_000),
@@ -62,6 +68,7 @@ export type ProviderPreset = Pick<
   shortLabel: string;
   description: string;
   localOnly?: boolean;
+  visionDefault?: boolean;
 };
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -75,6 +82,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "openai/gpt-5.4",
     baseURL: "",
     authMode: "bearer",
+    visionDefault: true,
   },
   {
     presetId: "vercel-gateway",
@@ -86,6 +94,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "openai/gpt-5.4",
     baseURL: "",
     authMode: "bearer",
+    visionDefault: true,
   },
   {
     presetId: "openai",
@@ -97,6 +106,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "gpt-5.4",
     baseURL: "https://api.openai.com/v1",
     authMode: "bearer",
+    visionDefault: true,
   },
   {
     presetId: "deepseek",
@@ -119,6 +129,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "anthropic/claude-sonnet-4.6",
     baseURL: "https://openrouter.ai/api/v1",
     authMode: "bearer",
+    visionDefault: true,
   },
   {
     presetId: "siliconflow",
@@ -141,6 +152,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "kimi-k2.5",
     baseURL: "https://api.moonshot.cn/v1",
     authMode: "bearer",
+    visionDefault: true,
   },
   {
     presetId: "dashscope",
@@ -174,6 +186,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "claude-sonnet-4-6",
     baseURL: "https://api.anthropic.com/v1",
     authMode: "x-api-key",
+    visionDefault: true,
   },
   {
     presetId: "google",
@@ -185,6 +198,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     model: "gemini-2.5-pro",
     baseURL: "",
     authMode: "x-api-key",
+    visionDefault: true,
   },
   {
     presetId: "ollama",
@@ -235,13 +249,17 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   apiKey: "",
   customHeaders: {},
   rememberApiKey: true,
+  capabilities: {
+    vision: AUTO_PRESET.visionDefault ?? false,
+  },
   generation: {
     temperature: 0.2,
     topP: null,
     maxOutputTokens: 16_000,
     maxRetries: 2,
     timeoutMs: DEFAULT_GENERATION_TIMEOUT_MS,
-    maxSteps: 4,
+    maxSteps: 6,
+    reasoningEffort: "medium",
     seed: null,
   },
   builder: {
@@ -250,6 +268,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
     redstonePrecision: true,
     preserveExisting: true,
     autoRunAfterGeneration: true,
+    maxAutoFixAttempts: 3,
     maxBuildBlocks: 200_000,
     executionTimeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
     extraInstructions: "",
@@ -258,7 +277,17 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
 
 const PREFERENCES_KEY = "forgescript:model-settings:v1";
 const SECRET_KEY = "forgescript:model-api-key:v1";
+const PROFILES_KEY = "forgescript:model-profiles:v1";
+const ACTIVE_PROFILE_KEY = "forgescript:active-model-profile:v1";
+const PROFILE_SECRET_PREFIX = "forgescript:model-profile-key:v1:";
 const LEGACY_DEFAULT_GENERATION_TIMEOUT_MS = 120_000;
+
+export type ModelProfile = {
+  id: string;
+  name: string;
+  settings: ModelSettings;
+  updatedAt: number;
+};
 
 export function getProviderPreset(id: string) {
   return PROVIDER_PRESETS.find((preset) => preset.presetId === id) ?? PROVIDER_PRESETS[0];
@@ -267,6 +296,12 @@ export function getProviderPreset(id: string) {
 export function providerLabel(settings: ModelSettings) {
   const preset = PROVIDER_PRESETS.find((item) => item.presetId === settings.presetId);
   return preset?.shortLabel ?? settings.providerName.toUpperCase();
+}
+
+export function inferVisionCapability(modelId: string) {
+  const id = modelId.toLowerCase();
+  if (/\b(embedding|embed|rerank|tts|whisper|audio|moderation)\b/.test(id)) return false;
+  return /(gpt-4(?:o|\.1)|gpt-5|o[134]|claude|gemini|vision|vl|pixtral|llava|kimi-k2\.5)/.test(id);
 }
 
 export function loadModelSettings(): ModelSettings {
@@ -302,4 +337,121 @@ export function saveModelSettings(settings: ModelSettings) {
   } else {
     window.sessionStorage.removeItem(SECRET_KEY);
   }
+}
+
+function profileSettings(candidate: unknown, apiKey: string) {
+  if (!candidate || typeof candidate !== "object") return null;
+  const value = candidate as Partial<ModelSettings>;
+  const parsed = modelSettingsSchema.safeParse({
+    ...DEFAULT_MODEL_SETTINGS,
+    ...value,
+    apiKey,
+    capabilities: { ...DEFAULT_MODEL_SETTINGS.capabilities, ...value.capabilities },
+    generation: { ...DEFAULT_MODEL_SETTINGS.generation, ...value.generation },
+    builder: { ...DEFAULT_MODEL_SETTINGS.builder, ...value.builder },
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+export function loadModelProfiles(): { profiles: ModelProfile[]; activeProfileId: string } {
+  if (typeof window === "undefined") {
+    return {
+      profiles: [{ id: "default", name: "默认配置", settings: DEFAULT_MODEL_SETTINGS, updatedAt: 0 }],
+      activeProfileId: "default",
+    };
+  }
+
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(PROFILES_KEY) ?? "[]") as unknown;
+    const entries = Array.isArray(stored) ? stored : [];
+    const profiles = entries.flatMap((entry): ModelProfile[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const raw = entry as Partial<ModelProfile>;
+      if (typeof raw.id !== "string" || typeof raw.name !== "string") return [];
+      const apiKey = window.sessionStorage.getItem(`${PROFILE_SECRET_PREFIX}${raw.id}`) ?? "";
+      const settings = profileSettings(raw.settings, apiKey);
+      if (!settings) return [];
+      return [{
+        id: raw.id,
+        name: raw.name.slice(0, 60) || "未命名配置",
+        settings,
+        updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : 0,
+      }];
+    });
+
+    if (profiles.length === 0) {
+      const migrated = loadModelSettings();
+      return {
+        profiles: [{ id: "default", name: "默认配置", settings: migrated, updatedAt: Date.now() }],
+        activeProfileId: "default",
+      };
+    }
+
+    const requestedActiveId = window.localStorage.getItem(ACTIVE_PROFILE_KEY);
+    const activeProfileId = profiles.some((profile) => profile.id === requestedActiveId)
+      ? requestedActiveId!
+      : profiles[0].id;
+    return { profiles, activeProfileId };
+  } catch {
+    return {
+      profiles: [{ id: "default", name: "默认配置", settings: loadModelSettings(), updatedAt: Date.now() }],
+      activeProfileId: "default",
+    };
+  }
+}
+
+export function saveModelProfiles(profiles: ModelProfile[], activeProfileId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    try {
+      const previous = JSON.parse(window.localStorage.getItem(PROFILES_KEY) ?? "[]") as unknown;
+      if (Array.isArray(previous)) {
+        const retainedIds = new Set(profiles.map((profile) => profile.id));
+        for (const entry of previous) {
+          if (entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string" && !retainedIds.has(entry.id)) {
+            window.sessionStorage.removeItem(`${PROFILE_SECRET_PREFIX}${entry.id}`);
+          }
+        }
+      }
+    } catch {
+      // Ignore malformed legacy profile data; the validated replacement below repairs it.
+    }
+
+    const safeProfiles = profiles.slice(0, 20).map((profile) => ({
+      ...profile,
+      name: profile.name.trim().slice(0, 60) || "未命名配置",
+      settings: { ...profile.settings, apiKey: "" },
+    }));
+    if (safeProfiles.length === 0) throw new Error("至少需要保留一个模型预设");
+    const safeActiveProfileId = safeProfiles.some((profile) => profile.id === activeProfileId)
+      ? activeProfileId
+      : safeProfiles[0].id;
+
+    window.localStorage.setItem(PROFILES_KEY, JSON.stringify(safeProfiles));
+    window.localStorage.setItem(ACTIVE_PROFILE_KEY, safeActiveProfileId);
+
+    for (const profile of profiles) {
+      const key = `${PROFILE_SECRET_PREFIX}${profile.id}`;
+      if (profile.settings.rememberApiKey && profile.settings.apiKey) {
+        window.sessionStorage.setItem(key, profile.settings.apiKey);
+      } else {
+        window.sessionStorage.removeItem(key);
+      }
+    }
+
+    const active = profiles.find((profile) => profile.id === safeActiveProfileId);
+    if (active) saveModelSettings(active.settings);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`模型预设未能写入浏览器存储：${reason}`);
+  }
+}
+
+export function createModelProfile(settings: ModelSettings, name = "新模型配置"): ModelProfile {
+  return {
+    id: crypto.randomUUID(),
+    name,
+    settings,
+    updatedAt: Date.now(),
+  };
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
+import type { FileUIPart } from "ai";
 import {
   Box,
   Braces,
@@ -16,16 +17,20 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  ImagePlus,
   Layers3,
   LoaderCircle,
   MessageSquarePlus,
   PanelRight,
+  Pencil,
   Play,
   Redo2,
+  RefreshCw,
   Send,
   Settings2,
   Sparkles,
   Undo2,
+  X,
   WandSparkles,
   Zap,
 } from "lucide-react";
@@ -49,9 +54,10 @@ const Viewport3D = dynamic(
 import { ModelSettingsDialog } from "./model-settings-dialog";
 import {
   DEFAULT_MODEL_SETTINGS,
-  loadModelSettings,
+  loadModelProfiles,
   providerLabel,
-  saveModelSettings,
+  saveModelProfiles,
+  type ModelProfile,
   type ModelSettings,
 } from "@/lib/ai/model-settings";
 import { DEFAULT_SOURCE } from "@/lib/minecraft/demo-source";
@@ -92,10 +98,32 @@ function messageText(message: UIMessage) {
 function committedSource(message: UIMessage): string | null {
   for (const part of message.parts) {
     if (part.type !== "tool-commit_source" || !("input" in part)) continue;
+    const output = "output" in part ? part.output as { accepted?: unknown } | undefined : undefined;
+    if (output?.accepted !== true) continue;
     const input = part.input as { source?: unknown } | undefined;
     if (typeof input?.source === "string") return input.source;
   }
   return null;
+}
+
+function messageImages(message: UIMessage) {
+  return message.parts.filter((part): part is FileUIPart =>
+    part.type === "file" && part.mediaType.startsWith("image/"),
+  );
+}
+
+function fileToUIPart(file: File): Promise<FileUIPart> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取图片 ${file.name}`));
+    reader.onload = () => resolve({
+      type: "file",
+      mediaType: file.type,
+      filename: file.name,
+      url: String(reader.result),
+    });
+    reader.readAsDataURL(file);
+  });
 }
 
 function formatBytes(bytes: number) {
@@ -137,9 +165,18 @@ export function BuilderWorkbench() {
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(DEFAULT_MODEL_SETTINGS);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([
+    { id: "default", name: "默认配置", settings: DEFAULT_MODEL_SETTINGS, updatedAt: 0 },
+  ]);
+  const [activeProfileId, setActiveProfileId] = useState("default");
+  const [attachments, setAttachments] = useState<FileUIPart[]>([]);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   const [notice, setNotice] = useState("正在载入版本化方块注册表…");
   const executionTimeoutRef = useRef(DEFAULT_MODEL_SETTINGS.builder.executionTimeoutMs);
+  const maxBuildBlocksRef = useRef(DEFAULT_MODEL_SETTINGS.builder.maxBuildBlocks);
   const autoFixCountRef = useRef(0);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
   const maxY = useMemo(
@@ -157,7 +194,15 @@ export function BuilderWorkbench() {
       const nextWorld = await executeBuilderSource(nextSource, {
         timeoutMs: executionTimeoutRef.current,
       });
-      const nextDiagnostics = validateWorld(nextWorld, nextPack);
+      const sizeDiagnostics: Diagnostic[] = nextWorld.blocks.length > maxBuildBlocksRef.current
+        ? [{
+            severity: "error",
+            stage: "structure",
+            code: "BUILD_BLOCK_LIMIT_EXCEEDED",
+            message: `结构包含 ${nextWorld.blocks.length.toLocaleString()} 个方块，超过配置上限 ${maxBuildBlocksRef.current.toLocaleString()}`,
+          }]
+        : [];
+      const nextDiagnostics = [...sizeDiagnostics, ...validateWorld(nextWorld, nextPack)];
       setWorld(nextWorld);
       setDiagnostics(nextDiagnostics);
       setSelected(null);
@@ -191,9 +236,13 @@ export function BuilderWorkbench() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      const settings = loadModelSettings();
-      executionTimeoutRef.current = settings.builder.executionTimeoutMs;
-      setModelSettings(settings);
+      const loaded = loadModelProfiles();
+      const active = loaded.profiles.find((profile) => profile.id === loaded.activeProfileId) ?? loaded.profiles[0];
+      executionTimeoutRef.current = active.settings.builder.executionTimeoutMs;
+      maxBuildBlocksRef.current = active.settings.builder.maxBuildBlocks;
+      setModelProfiles(loaded.profiles);
+      setActiveProfileId(active.id);
+      setModelSettings(active.settings);
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
@@ -237,7 +286,7 @@ export function BuilderWorkbench() {
       if (pack && modelSettings.builder.autoRunAfterGeneration) {
         const errors = await runWith(nextSource, pack);
         if (errors && errors.length > 0) {
-          if (autoFixCountRef.current < 3) {
+          if (autoFixCountRef.current < modelSettings.builder.maxAutoFixAttempts) {
             autoFixCountRef.current += 1;
             const errorReport = errors
               .map((err, i) => `${i + 1}. [${err.code}] ${err.message}${err.block ? ` 在坐标 x:${err.block.x}, y:${err.block.y}, z:${err.block.z}` : ""}`)
@@ -245,45 +294,23 @@ export function BuilderWorkbench() {
 
             const retryMessage = `刚才提交的 JavaScript 源码在沙箱运行或方块属性校验中遇到了以下阻断错误，请分析并修改源码予以解决。注意：请必须提交包含修复的完整 JavaScript 代码，且不要在对话中直接粘出大段代码。\n\n【阻断错误报告】\n${errorReport}`;
 
-            setNotice(`自动检测到阻断错误，正在发起第 ${autoFixCountRef.current}/3 次自动修正…`);
+            setNotice(`版本注册表发现阻断错误，Agent 正在进行第 ${autoFixCountRef.current}/${modelSettings.builder.maxAutoFixAttempts} 次二阶段修正…`);
 
-            // 自动追问，并标记该消息为自动修正类型，以在 UI 渲染中过滤掉
+            // 自动追问，并在创建消息时直接标记为内部修正，避免短暂闪现在 UI 中。
             setTimeout(() => {
               void sendMessage(
-                { text: retryMessage },
+                { text: retryMessage, metadata: { isAutoFix: true } },
                 {
                   body: {
                     version,
                     source: nextSource,
                     settings: modelSettings,
                   },
-                  headers: {
-                    // 自定义特殊标头可以在传输拦截或直接作为 metadata 存入消息
-                  },
                 }
-              ).then(() => {
-                // 将最新添加的 user 消息标记为 isAutoFix，从而从前端 UI 中隐藏
-                setMessages((current) => {
-                  const copy = [...current];
-                  // 寻找最后一条 user 消息并添加 metadata.isAutoFix 标记
-                  for (let i = copy.length - 1; i >= 0; i--) {
-                    if (copy[i].role === "user") {
-                      copy[i] = {
-                        ...copy[i],
-                        metadata: {
-                          ...(copy[i].metadata || {}),
-                          isAutoFix: true,
-                        },
-                      };
-                      break;
-                    }
-                  }
-                  return copy;
-                });
-              });
+              );
             }, 1000);
           } else {
-            setNotice(`自动修正已达 3 次上限，仍存在阻断错误。请手动修改或更换提示词。`);
+            setNotice(`二阶段自动修正已达 ${modelSettings.builder.maxAutoFixAttempts} 次上限，仍存在阻断错误。请手动修改或更换提示词。`);
             autoFixCountRef.current = 0; // 达到最大重试后重置
           }
         } else {
@@ -330,21 +357,82 @@ export function BuilderWorkbench() {
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setPrompt("");
     autoFixCountRef.current = 0; // 用户手动输入，重置自动修复计数
-    await sendMessage({ text }, { body: { version, source, settings: modelSettings } });
+    const files = attachments;
+    setAttachments([]);
+    await sendMessage({ text, files }, { body: { version, source, settings: modelSettings } });
+  };
+
+  const retryUserMessage = async (message: UIMessage) => {
+    if (chatStatus === "streaming" || chatStatus === "submitted") return;
+    autoFixCountRef.current = 0;
+    setNotice("正在从这条用户消息重新运行 Agent…");
+    await sendMessage(
+      { text: messageText(message), files: messageImages(message), messageId: message.id },
+      { body: { version, source, settings: modelSettings } },
+    );
+  };
+
+  const saveEditedMessage = async (message: UIMessage) => {
+    const text = editingText.trim();
+    if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
+    setEditingMessageId(null);
+    autoFixCountRef.current = 0;
+    setNotice("已修改消息，正在重新运行后续 Agent 流程…");
+    await sendMessage(
+      { text, files: messageImages(message), messageId: message.id },
+      { body: { version, source, settings: modelSettings } },
+    );
+  };
+
+  const addImages = async (files: FileList | null) => {
+    if (!files?.length) return;
+    if (!modelSettings.capabilities.vision) {
+      setNotice("当前模型配置未启用视觉输入，请先在模型设置中开启");
+      return;
+    }
+    const candidates = Array.from(files).filter((file) =>
+      ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type),
+    );
+    const oversized = candidates.find((file) => file.size > 8 * 1024 * 1024);
+    if (oversized) {
+      setNotice(`${oversized.name} 超过 8 MB，未添加`);
+      return;
+    }
+    const available = Math.max(0, 4 - attachments.length);
+    if (available === 0) {
+      setNotice("每条消息最多上传 4 张图片");
+      return;
+    }
+    try {
+      const parts = await Promise.all(candidates.slice(0, available).map(fileToUIPart));
+      setAttachments((current) => [...current, ...parts].slice(0, 4));
+      if (candidates.length > available) setNotice("每条消息最多上传 4 张图片，其余图片未添加");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (imageInputRef.current) imageInputRef.current.value = "";
+    }
   };
 
   const startNewConversation = () => {
     stop();
     setMessages([]);
     setPrompt("");
+    setAttachments([]);
+    setEditingMessageId(null);
     setNotice("已开启新对话 · 当前建筑源码与预览保持不变");
   };
 
-  const updateModelSettings = (settings: ModelSettings) => {
-    executionTimeoutRef.current = settings.builder.executionTimeoutMs;
-    setModelSettings(settings);
-    saveModelSettings(settings);
-    setNotice(`模型设置已更新 · ${providerLabel(settings)} · ${settings.model}`);
+  const updateModelSettings = (profiles: ModelProfile[], nextActiveProfileId: string) => {
+    const active = profiles.find((profile) => profile.id === nextActiveProfileId) ?? profiles[0];
+    saveModelProfiles(profiles, active.id);
+    executionTimeoutRef.current = active.settings.builder.executionTimeoutMs;
+    maxBuildBlocksRef.current = active.settings.builder.maxBuildBlocks;
+    setModelProfiles(profiles);
+    setActiveProfileId(active.id);
+    setModelSettings(active.settings);
+    setAttachments([]);
+    setNotice(`模型预设已保存 · ${active.name} · ${providerLabel(active.settings)} · ${active.settings.model}`);
   };
 
   const exportLitematic = async () => {
@@ -373,7 +461,8 @@ export function BuilderWorkbench() {
       <ModelSettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
-        value={modelSettings}
+        profiles={modelProfiles}
+        activeProfileId={activeProfileId}
         onSave={updateModelSettings}
       />
       <header className="topbar">
@@ -469,38 +558,102 @@ export function BuilderWorkbench() {
                 return (
                   <Message from={message.role} key={message.id} className="builder-message">
                     {message.role === "assistant" && <div className="assistant-avatar"><WandSparkles size={15} /></div>}
-                    <MessageContent className={message.role === "user" ? "user-message-content" : "assistant-message-content"}>
-                      {/* 渲染模型推理过程/思考链 */}
-                      {message.parts.some(p => p.type === "reasoning") && (
-                        <Collapsible className="reasoning-collapsible mb-2 border border-[#d8d5cb] rounded-md bg-[#f6f5f0] overflow-hidden">
-                          <CollapsibleTrigger className="flex w-full items-center justify-between p-2 text-xs font-semibold text-[#6a716d] hover:bg-[#e8e5dc]/50 transition-colors">
-                            <span className="flex items-center gap-1.5"><ChevronRight size={12} className="transition-transform group-data-[state=open]:rotate-90" />查看 AI 思考过程</span>
-                          </CollapsibleTrigger>
-                          <CollapsibleContent className="p-3 border-t border-[#d8d5cb] text-xs font-mono text-[#555] bg-white whitespace-pre-wrap leading-relaxed max-h-[220px] overflow-y-auto">
-                            {message.parts
-                              .filter(p => p.type === "reasoning")
-                              .map(p => (p as { text: string }).text)
-                              .join("")}
-                          </CollapsibleContent>
-                        </Collapsible>
-                      )}
-
-                      {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
-                      {message.parts.map((part, index) => {
-                        if (part.type !== "tool-commit_source") return null;
-                        return (
-                          <Tool key={`${message.id}-${index}`} className="source-tool" defaultOpen>
-                            <ToolHeader type={part.type} state={part.state} title="建筑源码变更" />
-                            <ToolContent>
-                              <div className="change-summary">
-                                <FileCode2 size={16} />
-                                <div><strong>完整源码已提交</strong><span>将在 QuickJS 隔离环境中执行并校验</span></div>
+                    {message.role === "user" ? (
+                      <div className="user-message-stack">
+                        {editingMessageId === message.id ? (
+                          <div className="message-editor">
+                            <textarea value={editingText} onChange={(event) => setEditingText(event.target.value)} rows={4} autoFocus />
+                            <div>
+                              <button type="button" onClick={() => setEditingMessageId(null)}>取消</button>
+                              <button type="button" className="primary" onClick={() => void saveEditedMessage(message)} disabled={!editingText.trim()}>保存并重试</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <MessageContent className="user-message-content">
+                            {messageImages(message).length > 0 && (
+                              <div className="message-images">
+                                {messageImages(message).map((image, index) => (
+                                  <img key={`${message.id}-image-${index}`} src={image.url} alt={image.filename || `参考图片 ${index + 1}`} />
+                                ))}
                               </div>
-                            </ToolContent>
-                          </Tool>
-                        );
-                      })}
-                    </MessageContent>
+                            )}
+                            {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
+                          </MessageContent>
+                        )}
+                        <div className="user-message-actions">
+                          <button type="button" onClick={() => void retryUserMessage(message)} disabled={chatStatus === "streaming" || chatStatus === "submitted"} title="从此消息重新生成"><RefreshCw size={11} />重试</button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingMessageId(message.id);
+                              setEditingText(messageText(message));
+                            }}
+                            disabled={chatStatus === "streaming" || chatStatus === "submitted"}
+                            title="修改后重新生成"
+                          ><Pencil size={11} />修改</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <MessageContent className="assistant-message-content">
+                        {message.parts.some((part) => part.type === "reasoning") && (
+                          <Collapsible className="reasoning-collapsible">
+                            <CollapsibleTrigger>
+                              <span><ChevronRight size={12} />AI 推理摘要</span>
+                              <small>模型提供</small>
+                            </CollapsibleTrigger>
+                            <CollapsibleContent>
+                              {message.parts
+                                .filter((part) => part.type === "reasoning")
+                                .map((part) => part.text)
+                                .join("")}
+                            </CollapsibleContent>
+                          </Collapsible>
+                        )}
+
+                        {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
+                        {message.parts.map((part, index) => {
+                          if (part.type !== "tool-commit_source") return null;
+                          const output = "output" in part ? part.output as {
+                            accepted?: boolean;
+                            error?: string;
+                            validation?: {
+                              blockCount?: number;
+                              paletteSize?: number;
+                              size?: number[];
+                              declaredVersion?: string;
+                              regionCount?: number;
+                              operationCount?: number;
+                            };
+                          } | undefined : undefined;
+                          const accepted = output?.accepted;
+                          const validationSummary = output?.validation?.blockCount !== undefined
+                            ? `${output.validation.blockCount.toLocaleString()} 方块 · ${output.validation.paletteSize} 种状态 · ${output.validation.size?.join("×")}`
+                            : output?.validation
+                              ? `${output.validation.regionCount ?? 0} 个区域 · ${output.validation.operationCount ?? 0} 个构建操作 · Java ${output.validation.declaredVersion}`
+                              : "安全规则、SDK 结构与版本元数据检查";
+                          return (
+                            <Tool key={`${message.id}-${index}`} className={`source-tool ${accepted === false ? "is-rejected" : accepted === true ? "is-accepted" : ""}`} defaultOpen={accepted === false}>
+                              <ToolHeader
+                                type={part.type}
+                                state={part.state}
+                                title={accepted === true ? "Agent 预检通过" : accepted === false ? "Agent 收到错误并继续修正" : "Agent 正在预检源码"}
+                              />
+                              <ToolContent>
+                                <div className="change-summary">
+                                  {accepted === false ? <CircleAlert size={16} /> : <FileCode2 size={16} />}
+                                  <div>
+                                    <strong>{accepted === true ? "完整源码已通过 Worker 安全预检" : accepted === false ? "本次提交未通过" : "正在检查源码结构与安全规则"}</strong>
+                                    <span>
+                                      {output?.error ?? validationSummary}
+                                    </span>
+                                  </div>
+                                </div>
+                              </ToolContent>
+                            </Tool>
+                          );
+                        })}
+                      </MessageContent>
+                    )}
                   </Message>
                 );
               })}
@@ -520,6 +673,16 @@ export function BuilderWorkbench() {
           )}
 
           <div className="chat-composer">
+            {attachments.length > 0 && (
+              <div className="composer-attachments">
+                {attachments.map((image, index) => (
+                  <div key={`${image.filename}-${index}`}>
+                    <img src={image.url} alt={image.filename || `待发送图片 ${index + 1}`} />
+                    <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${image.filename || "图片"}`}><X size={11} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
@@ -533,7 +696,26 @@ export function BuilderWorkbench() {
               rows={3}
             />
             <div className="composer-footer">
-              <span><Zap size={12} /> 选择与版本会自动附带</span>
+              <div className="composer-tools">
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  onChange={(event) => void addImages(event.target.files)}
+                  tabIndex={-1}
+                  aria-hidden="true"
+                />
+                <button
+                  type="button"
+                  className="attach-button"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={!modelSettings.capabilities.vision || attachments.length >= 4}
+                  title={modelSettings.capabilities.vision ? "上传参考图片" : "当前模型未启用视觉输入"}
+                  aria-label="上传参考图片"
+                ><ImagePlus size={14} /></button>
+                <span><Zap size={12} /> {modelSettings.capabilities.vision ? "支持视觉输入" : "版本上下文已附带"}</span>
+              </div>
               <button onClick={() => void submitPrompt()} disabled={!prompt.trim() || chatStatus === "streaming" || chatStatus === "submitted"} aria-label="发送消息"><Send size={15} /></button>
             </div>
           </div>

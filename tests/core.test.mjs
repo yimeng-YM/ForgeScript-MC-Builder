@@ -5,10 +5,15 @@ import test from "node:test";
 import {
   DEFAULT_GENERATION_TIMEOUT_MS,
   DEFAULT_MODEL_SETTINGS,
+  createModelProfile,
+  inferVisionCapability,
+  loadModelProfiles,
   MAX_GENERATION_TIMEOUT_MS,
   modelSettingsSchema,
   PROVIDER_PRESETS,
+  saveModelProfiles,
 } from "../lib/ai/model-settings.ts";
+import { preflightBuilderSource } from "../lib/ai/source-preflight.ts";
 import { DEFAULT_SOURCE, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
 import { redstoneSignalDirection } from "../lib/minecraft/redstone.ts";
@@ -35,6 +40,10 @@ test("ships validated model provider presets and safe generation defaults", () =
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxOutputTokens, 16_000);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, 30 * 60 * 1_000);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, DEFAULT_GENERATION_TIMEOUT_MS);
+  assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxSteps, 6);
+  assert.equal(DEFAULT_MODEL_SETTINGS.generation.reasoningEffort, "medium");
+  assert.equal(DEFAULT_MODEL_SETTINGS.capabilities.vision, true);
+  assert.equal(DEFAULT_MODEL_SETTINGS.builder.maxAutoFixAttempts, 3);
   assert.equal(
     modelSettingsSchema.safeParse({
       ...DEFAULT_MODEL_SETTINGS,
@@ -55,6 +64,104 @@ test("ships validated model provider presets and safe generation defaults", () =
     }).success,
     false,
   );
+});
+
+test("infers common multimodal model capabilities without treating utility models as vision chat", () => {
+  assert.equal(inferVisionCapability("openai/gpt-5.4"), true);
+  assert.equal(inferVisionCapability("anthropic/claude-sonnet-4.6"), true);
+  assert.equal(inferVisionCapability("google/gemini-2.5-pro"), true);
+  assert.equal(inferVisionCapability("text-embedding-3-large"), false);
+  assert.equal(inferVisionCapability("deepseek-chat"), false);
+});
+
+test("saves multiple model profiles and restores the active preset after reload", () => {
+  const localValues = new Map();
+  const sessionValues = new Map();
+  const storageFor = (values) => ({
+    get length() { return values.size; },
+    clear() { values.clear(); },
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    key(index) { return [...values.keys()][index] ?? null; },
+    removeItem(key) { values.delete(key); },
+    setItem(key, value) { values.set(key, String(value)); },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    localStorage: storageFor(localValues),
+    sessionStorage: storageFor(sessionValues),
+  };
+
+  try {
+    const defaultProfile = {
+      id: "default",
+      name: "默认配置",
+      settings: DEFAULT_MODEL_SETTINGS,
+      updatedAt: 0,
+    };
+    const deepseekPreset = PROVIDER_PRESETS.find((preset) => preset.presetId === "deepseek");
+    assert.ok(deepseekPreset);
+    const deepseekProfile = createModelProfile({
+      ...DEFAULT_MODEL_SETTINGS,
+      ...deepseekPreset,
+      apiKey: "session-only-secret",
+      rememberApiKey: true,
+    }, "DeepSeek 预设");
+
+    saveModelProfiles([defaultProfile, deepseekProfile], deepseekProfile.id);
+    const restored = loadModelProfiles();
+
+    assert.equal(restored.profiles.length, 2);
+    assert.equal(restored.activeProfileId, deepseekProfile.id);
+    assert.equal(restored.profiles[1].name, "DeepSeek 预设");
+    assert.equal(restored.profiles[1].settings.model, deepseekPreset.model);
+    assert.equal(restored.profiles[1].settings.apiKey, "session-only-secret");
+    assert.doesNotMatch(JSON.stringify([...localValues.values()]), /session-only-secret/);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("preflights agent source without requiring the QuickJS WASM runtime", () => {
+  const valid = preflightBuilderSource(
+    sourceForPrompt("建造一座高塔", "1.21.11"),
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(valid.accepted, true);
+  assert.ok(valid.accepted && valid.validation.operationCount > 0);
+
+  const wrongVersion = preflightBuilderSource(
+    sourceForPrompt("建造一座高塔", "1.20.4"),
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(wrongVersion.accepted, false);
+  assert.equal(wrongVersion.accepted ? "" : wrongVersion.stage, "metadata");
+
+  const unsafe = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, () => { fetch("https://example.com"); });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(unsafe.accepted, false);
+  assert.equal(unsafe.accepted ? "" : unsafe.stage, "security");
+
+  const missingNamespace = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, ({ block }) => { block("stone"); });',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(missingNamespace.accepted, false);
+  assert.match(missingNamespace.accepted ? "" : missingNamespace.error, /minecraft:stone/);
+
+  const malformed = preflightBuilderSource(
+    'mc.build({ version: "1.21.11" }, () => {',
+    "1.21.11",
+    250_000,
+  );
+  assert.equal(malformed.accepted, false);
+  assert.equal(malformed.accepted ? "" : malformed.stage, "syntax");
 });
 
 test("executes generated JavaScript inside the controlled Building SDK", async () => {
