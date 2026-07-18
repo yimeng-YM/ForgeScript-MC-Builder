@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build && node scripts/fix-ssr-externals-v2.mjs",
+    "build": "vinext build && (node scripts/fix-ssr-externals-v2.mjs || node scripts/fix-ssr-externals.cjs || true)",
     "start": "vinext start",
     "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
