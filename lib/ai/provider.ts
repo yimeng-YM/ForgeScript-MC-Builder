@@ -99,6 +99,37 @@ export function resolvedApiKey(settings: ModelSettings) {
   return settings.apiKey.trim() || serverKeyFor(settings);
 }
 
+function isDeepSeekEndpoint(settings: ModelSettings) {
+  if (settings.provider !== "openai-compatible") return false;
+
+  let matches = settings.presetId === "deepseek"
+    || settings.providerName.trim().toLowerCase() === "deepseek";
+  let usesBetaEndpoint = false;
+  try {
+    const url = new URL(settings.baseURL);
+    matches ||= url.hostname.toLowerCase() === "api.deepseek.com";
+    usesBetaEndpoint = url.pathname.split("/").includes("beta");
+  } catch {
+    // resolveModel will report an invalid Base URL before a request is sent.
+  }
+
+  return { matches, usesBetaEndpoint };
+}
+
+export function shouldUseStrictToolSchema(settings: ModelSettings) {
+  const deepSeek = isDeepSeekEndpoint(settings);
+  if (!deepSeek) return true;
+
+  // DeepSeek only accepts function.strict=true through its /beta endpoint.
+  return !deepSeek.matches || deepSeek.usesBetaEndpoint;
+}
+
+export function requiredToolChoice(settings: ModelSettings): "required" | undefined {
+  const deepSeek = isDeepSeekEndpoint(settings);
+  // DeepSeek V4 thinking mode rejects the tool_choice parameter itself.
+  return deepSeek && deepSeek.matches ? undefined : "required";
+}
+
 export function modelDiscoveryHeaders(settings: ModelSettings) {
   const apiKey = resolvedApiKey(settings);
   const headers = safeHeaders(settings, apiKey);

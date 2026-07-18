@@ -179,16 +179,24 @@ export function parseResourcePackMetadata(text: string, fallbackName: string): P
   };
 }
 
-function findArchiveRoot(files: Map<string, Uint8Array>) {
-  const metadataPaths = [...files.keys()]
-    .filter((path) => path.toLowerCase().endsWith("pack.mcmeta"))
-    .sort((left, right) => left.split("/").length - right.split("/").length);
-  if (metadataPaths.length > 0) return metadataPaths[0].slice(0, -"pack.mcmeta".length);
+export function findResourceArchiveRoot(files: Map<string, Uint8Array>) {
+  const assetRoots = [...new Set([...files.keys()]
+    .map((path) => {
+      const match = path.match(/(^|\/)assets\/[^/]+\//i);
+      if (!match || match.index === undefined) return null;
+      return path.slice(0, match.index + (match[1] === "/" ? 1 : 0));
+    })
+    .filter((root): root is string => root !== null))]
+    .sort((left, right) => left.split("/").length - right.split("/").length || left.length - right.length);
 
-  const assetPath = [...files.keys()].find((path) => /(^|\/)assets\/[^/]+\//i.test(path));
-  if (!assetPath) throw new Error("压缩包中没有 pack.mcmeta 或 assets/<namespace> 资源目录");
-  const marker = assetPath.toLowerCase().indexOf("assets/");
-  return assetPath.slice(0, marker);
+  // Client JARs do not necessarily have a root pack.mcmeta, but can contain
+  // nested data-pack metadata. The assets directory is therefore the source
+  // of truth; prefer an assets root paired with pack.mcmeta for normal ZIPs.
+  const pairedRoot = assetRoots.find((root) => files.has(`${root}pack.mcmeta`));
+  if (pairedRoot !== undefined) return pairedRoot;
+  if (assetRoots.length > 0) return assetRoots[0];
+
+  throw new Error("压缩包中没有 assets/<namespace> 资源目录");
 }
 
 function unzipBytes(bytes: Uint8Array): Promise<Map<string, Uint8Array>> {
@@ -289,7 +297,7 @@ export async function importResourcePack(file: File): Promise<ResourcePackSummar
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   const files = await unzipBytes(bytes);
-  const archiveRoot = findArchiveRoot(files);
+  const archiveRoot = findResourceArchiveRoot(files);
   const metadataBytes = files.get(`${archiveRoot}pack.mcmeta`);
   const fallbackName = file.name.replace(/\.(zip|jar)$/i, "");
   const metadata = metadataBytes
@@ -385,7 +393,9 @@ async function unpackRecord(record: ResourcePackRecord) {
   if (cached) return cached;
   const loading = record.blob.arrayBuffer()
     .then((buffer) => unzipBytes(new Uint8Array(buffer)))
-    .then((files) => ({ files, archiveRoot: record.archiveRoot }));
+    // Re-detect the root instead of trusting stored metadata so JARs imported
+    // by older builds recover automatically without requiring a re-import.
+    .then((files) => ({ files, archiveRoot: findResourceArchiveRoot(files) }));
   archiveCache.set(record.id, loading);
   return loading;
 }
@@ -430,13 +440,14 @@ export async function resolveResourcePackAssets(
       continue;
     }
     const archive = await unpackRecord(record);
-    for (const filter of record.filters) {
+    const isClientJar = record.kind === "client-jar" || /\.jar$/i.test(record.fileName);
+    for (const filter of isClientJar ? [] : record.filters) {
       for (const key of files.keys()) {
         if (matchesFilter(key, filter)) files.delete(key);
       }
     }
     applyAssetsFromPrefix(files, archive.files, `${archive.archiveRoot}assets/`);
-    for (const overlay of record.overlays) {
+    for (const overlay of isClientJar ? [] : record.overlays) {
       const applies = targetFormat === null || (targetFormat >= overlay.formats.min && targetFormat <= overlay.formats.max);
       if (applies) {
         applyAssetsFromPrefix(files, archive.files, `${archive.archiveRoot}${overlay.directory}/assets/`);

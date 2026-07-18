@@ -20,7 +20,12 @@ import {
   latestCommitOutput,
   type BuilderUIMessage,
 } from "@/lib/ai/agent-protocol";
-import { publicModelError, resolveModel } from "@/lib/ai/provider";
+import {
+  publicModelError,
+  requiredToolChoice,
+  resolveModel,
+  shouldUseStrictToolSchema,
+} from "@/lib/ai/provider";
 import { sourceForPrompt } from "@/lib/minecraft/demo-source";
 
 export const runtime = "edge";
@@ -32,12 +37,14 @@ const requestSchema = z.object({
   settings: modelSettingsSchema.default(DEFAULT_MODEL_SETTINGS),
 });
 
-const commitSourceTool = tool({
-  description: "提交完整 JavaScript，由浏览器执行 AST 预检、QuickJS 沙箱和版本方块注册表校验；失败时根据结果继续修正。",
-  inputSchema: commitSourceInputSchema,
-  outputSchema: commitSourceOutputSchema,
-  strict: true,
-});
+function createCommitSourceTool(settings: ModelSettings) {
+  return tool({
+    description: "提交完整 JavaScript，由浏览器执行 AST 预检、QuickJS 沙箱和版本方块注册表校验；失败时根据结果继续修正。",
+    inputSchema: commitSourceInputSchema,
+    outputSchema: commitSourceOutputSchema,
+    ...(shouldUseStrictToolSchema(settings) ? { strict: true } : {}),
+  });
+}
 
 function getLatestPrompt(messages: UIMessage[]): string {
   const latest = [...messages].reverse().find((message) => message.role === "user");
@@ -206,6 +213,9 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return Response.json({ error: "Invalid chat request" }, { status: 400 });
   }
+  const { version, source, settings } = parsed.data;
+  const commitSourceTool = createCommitSourceTool(settings);
+  const toolChoice = requiredToolChoice(settings);
   const validated = await safeValidateUIMessages<BuilderUIMessage>({
     messages: parsed.data.messages,
     tools: { commit_source: commitSourceTool },
@@ -214,7 +224,6 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid UI message history" }, { status: 400 });
   }
   const messages = validated.data;
-  const { version, source, settings } = parsed.data;
   const totalTextLength = messages.reduce(
     (total, message) => total + message.parts.reduce(
       (messageTotal, part) => messageTotal + (part.type === "text" ? part.text.length : 0),
@@ -267,9 +276,12 @@ export async function POST(request: Request) {
       : settings.generation.reasoningEffort,
     ...(shouldFinalize ? {} : {
       tools: { commit_source: commitSourceTool },
-      toolChoice: "required" as const,
+      ...(toolChoice ? { toolChoice } : {}),
     }),
   });
 
-  return result.toUIMessageStreamResponse({ originalMessages: messages });
+  return result.toUIMessageStreamResponse({
+    originalMessages: messages,
+    onError: (error) => publicModelError(error, settings.apiKey),
+  });
 }

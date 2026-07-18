@@ -14,8 +14,9 @@ import {
   saveModelProfiles,
 } from "../lib/ai/model-settings.ts";
 import { latestCommitOutput } from "../lib/ai/agent-protocol.ts";
+import { requiredToolChoice, shouldUseStrictToolSchema } from "../lib/ai/provider.ts";
 import { preflightBuilderSource } from "../lib/ai/source-preflight.ts";
-import { DEFAULT_SOURCE, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
+import { DEFAULT_SOURCE, emptySource, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
 import { redstoneSignalDirection } from "../lib/minecraft/redstone.ts";
 import { executeBuilderSource } from "../lib/minecraft/runner.ts";
@@ -65,6 +66,23 @@ test("ships validated model provider presets and safe generation defaults", () =
     }).success,
     false,
   );
+});
+
+test("uses DeepSeek strict tools only with its required beta endpoint", () => {
+  const deepseek = PROVIDER_PRESETS.find((preset) => preset.presetId === "deepseek");
+  const openai = PROVIDER_PRESETS.find((preset) => preset.presetId === "openai");
+  assert.ok(deepseek);
+  assert.ok(openai);
+
+  assert.equal(shouldUseStrictToolSchema({ ...DEFAULT_MODEL_SETTINGS, ...deepseek }), false);
+  assert.equal(requiredToolChoice({ ...DEFAULT_MODEL_SETTINGS, ...deepseek }), undefined);
+  assert.equal(shouldUseStrictToolSchema({
+    ...DEFAULT_MODEL_SETTINGS,
+    ...deepseek,
+    baseURL: "https://api.deepseek.com/beta",
+  }), true);
+  assert.equal(shouldUseStrictToolSchema({ ...DEFAULT_MODEL_SETTINGS, ...openai }), true);
+  assert.equal(requiredToolChoice({ ...DEFAULT_MODEL_SETTINGS, ...openai }), "required");
 });
 
 test("infers common multimodal model capabilities without treating utility models as vision chat", () => {
@@ -230,6 +248,32 @@ test("starts with a neutral empty project instead of a demo building", async () 
   assert.equal(world.name, "空白项目");
   assert.equal(world.blocks.length, 0);
   assert.doesNotMatch(DEFAULT_SOURCE, /小木屋|spruce_planks|oak_planks/);
+
+  const versionedWorld = await executeBuilderSource(emptySource("1.20.4"));
+  assert.equal(versionedWorld.version, "1.20.4");
+  assert.equal(versionedWorld.blocks.length, 0);
+});
+
+test("keeps conversations and source ephemeral and resets the complete drawing workspace", async () => {
+  const workbenchSource = await readFile(
+    new URL("../components/builder/workbench.tsx", import.meta.url),
+    "utf8",
+  );
+  const persistenceSource = await readFile(
+    new URL("../lib/ai/agent-persistence.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(workbenchSource, /loadAgentSession|saveAgentSession/);
+  assert.doesNotMatch(persistenceSource, /loadAgentSession|saveAgentSession|objectStore/);
+  assert.match(persistenceSource, /indexedDB\.deleteDatabase/);
+  assert.match(workbenchSource, /void clearAgentSession\(\)/);
+  assert.match(workbenchSource, /setMessages\(\[\]\)/);
+  assert.match(workbenchSource, /setSource\(emptySource\(version\)\)/);
+  assert.match(workbenchSource, /setWorld\(createEmptyWorld\(version\)\)/);
+  assert.match(workbenchSource, /setDiagnostics\(\[\]\)/);
+  assert.match(workbenchSource, /setActiveTab\("preview"\)/);
+  assert.match(workbenchSource, /<span>新会话<\/span>/);
 });
 
 test("safely interrupts runaway building scripts at the configured deadline", async () => {

@@ -1,6 +1,12 @@
 import * as THREE from "three";
 import { Cull, Identifier, type Mesh as DeepslateMesh, type Resources } from "deepslate";
-import { collisionBoxesForBlock, type CollisionShapePack } from "./block-shapes";
+import {
+  collisionBoxesCoverFace,
+  collisionBoxesForBlock,
+  type CollisionBox,
+  type CollisionFace,
+  type CollisionShapePack,
+} from "./block-shapes";
 import type { PlacedBlock, VersionPack } from "./types";
 
 type GeometryAccumulator = {
@@ -46,21 +52,35 @@ function blockKey(block: Pick<PlacedBlock, "x" | "y" | "z">) {
   return `${block.x},${block.y},${block.z}`;
 }
 
-function cullForBlock(block: PlacedBlock, positions: Map<string, PlacedBlock>, resources: Resources) {
+function cullForBlock(
+  block: PlacedBlock,
+  positions: Map<string, PlacedBlock>,
+  resources: Resources,
+  shapePack: CollisionShapePack | null,
+  versionPack: VersionPack,
+  shapeCache: Map<string, CollisionBox[]>,
+) {
   const cull = Cull.none();
   const neighbors = [
-    ["up", 0, 1, 0],
-    ["down", 0, -1, 0],
-    ["west", -1, 0, 0],
-    ["east", 1, 0, 0],
-    ["north", 0, 0, -1],
-    ["south", 0, 0, 1],
+    ["up", "down", 0, 1, 0],
+    ["down", "up", 0, -1, 0],
+    ["west", "east", -1, 0, 0],
+    ["east", "west", 1, 0, 0],
+    ["north", "south", 0, 0, -1],
+    ["south", "north", 0, 0, 1],
   ] as const;
-  for (const [direction, dx, dy, dz] of neighbors) {
-    const neighbor = positions.get(`${block.x + dx},${block.y + dy},${block.z + dz}`);
+  for (const [direction, neighborFace, dx, dy, dz] of neighbors) {
+    const neighborKey = `${block.x + dx},${block.y + dy},${block.z + dz}`;
+    const neighbor = positions.get(neighborKey);
     if (!neighbor) continue;
     const flags = resources.getBlockFlags(Identifier.parse(neighbor.state.id));
-    if (flags?.opaque) cull[direction] = true;
+    if (!flags?.opaque) continue;
+    let boxes = shapeCache.get(neighborKey);
+    if (!boxes) {
+      boxes = collisionBoxesForBlock(neighbor, shapePack, versionPack);
+      shapeCache.set(neighborKey, boxes);
+    }
+    if (collisionBoxesCoverFace(boxes, neighborFace as CollisionFace)) cull[direction] = true;
   }
   return cull;
 }
@@ -221,6 +241,7 @@ export function createPreviewMeshes({
     const opaque = emptyAccumulator();
     const translucent = emptyAccumulator();
     const positions = canCull ? new Map(blocks.map((block) => [blockKey(block), block])) : new Map<string, PlacedBlock>();
+    const shapeCache = new Map<string, CollisionBox[]>();
     for (const block of blocks) {
       const id = Identifier.parse(block.state.id);
       const definition = resources.getBlockDefinition(id);
@@ -233,7 +254,9 @@ export function createPreviewMeshes({
           ...(resources.getDefaultBlockProperties(id) ?? {}),
           ...block.state.properties,
         };
-        const cull = canCull ? cullForBlock(block, positions, resources) : Cull.none();
+        const cull = canCull
+          ? cullForBlock(block, positions, resources, shapePack, versionPack, shapeCache)
+          : Cull.none();
         const mesh = definition.getMesh(id, properties, resources, resources, cull);
         if (mesh.isEmpty()) {
           fallback.push(block);

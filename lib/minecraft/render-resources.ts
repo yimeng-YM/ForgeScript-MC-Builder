@@ -29,6 +29,65 @@ function parseJson(bytes: Uint8Array, path: string, warnings: string[]) {
   }
 }
 
+function flattenResolvableBlockModels(blockModels: Map<string, BlockModel>, warnings: string[]) {
+  const resolvable = new Map<string, boolean>();
+  const missingParents = new Set<string>();
+  const cycles = new Set<string>();
+
+  const canFlatten = (id: string, visiting: Set<string>): boolean => {
+    const cached = resolvable.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) {
+      cycles.add(id);
+      resolvable.set(id, false);
+      return false;
+    }
+
+    const model = blockModels.get(id);
+    const parent = (model as unknown as { parent?: Identifier } | undefined)?.parent;
+    if (!model || !parent || parent.toString() === "minecraft:builtin/generated") {
+      resolvable.set(id, Boolean(model));
+      return Boolean(model);
+    }
+
+    const parentId = parent.toString();
+    const parentModel = blockModels.get(parentId);
+    if (!parentModel) {
+      // builtin/entity is rendered by Minecraft's block-entity renderer and
+      // has no JSON parent model. It is expected to fall back in this preview.
+      if (parentId !== "minecraft:builtin/entity") missingParents.add(parentId);
+      resolvable.set(id, false);
+      return false;
+    }
+
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(id);
+    const result = canFlatten(parentId, nextVisiting);
+    resolvable.set(id, result);
+    return result;
+  };
+
+  for (const id of blockModels.keys()) canFlatten(id, new Set());
+  for (const [id, model] of blockModels) {
+    if (!resolvable.get(id)) continue;
+    try {
+      model.flatten({
+        getBlockModel(parentId) {
+          return blockModels.get(parentId.toString()) ?? null;
+        },
+      });
+    } catch (error) {
+      warnings.push(`${id} 的父模型继承解析失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (missingParents.size > 0) {
+    const sample = [...missingParents].slice(0, 6).join("、");
+    warnings.push(`资源包栈缺少 ${missingParents.size} 个父模型（如 ${sample}）；受影响方块将使用形状回退`);
+  }
+  if (cycles.size > 0) warnings.push(`检测到 ${cycles.size} 个循环模型继承，已使用形状回退`);
+}
+
 export async function loadRenderResources(
   packs: ResourcePackSummary[],
   targetFormat: number | null,
@@ -78,18 +137,7 @@ export async function loadRenderResources(
     }
   }
 
-  const provider = {
-    getBlockModel(id: Identifier) {
-      return blockModels.get(id.toString()) ?? null;
-    },
-  };
-  for (const [id, model] of blockModels) {
-    try {
-      model.flatten(provider);
-    } catch (error) {
-      warnings.push(`${id} 的父模型继承解析失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  flattenResolvableBlockModels(blockModels, warnings);
 
   const atlas = Object.keys(textures).length > 0
     ? await TextureAtlas.fromBlobs(textures)

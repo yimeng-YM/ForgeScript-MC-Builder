@@ -1,6 +1,6 @@
 const quote = (value: string) => JSON.stringify(value);
 
-function emptySource(version: string) {
+export function emptySource(version: string) {
   return `mc.build({
   name: "空白项目",
   version: ${quote(version)},

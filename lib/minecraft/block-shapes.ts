@@ -1,6 +1,7 @@
 import type { BlockDefinition, PlacedBlock, VersionPack } from "./types";
 
 export type CollisionBox = [number, number, number, number, number, number];
+export type CollisionFace = "up" | "down" | "west" | "east" | "north" | "south";
 
 export type CollisionShapePack = {
   format: 1;
@@ -11,6 +12,71 @@ export type CollisionShapePack = {
 
 const shapePackCache = new Map<string, CollisionShapePack>();
 const blockDefinitionCache = new WeakMap<VersionPack, Map<string, BlockDefinition>>();
+const COVERAGE_EPSILON = 1e-6;
+
+type FaceRectangle = [number, number, number, number];
+
+function clampUnit(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function rectanglesCoverUnitFace(rectangles: FaceRectangle[]) {
+  if (rectangles.length === 0) return false;
+  const horizontal = [...new Set([0, 1, ...rectangles.flatMap((rectangle) => [rectangle[0], rectangle[2]])])]
+    .map(clampUnit)
+    .sort((left, right) => left - right);
+  const vertical = [...new Set([0, 1, ...rectangles.flatMap((rectangle) => [rectangle[1], rectangle[3]])])]
+    .map(clampUnit)
+    .sort((left, right) => left - right);
+
+  for (let horizontalIndex = 0; horizontalIndex < horizontal.length - 1; horizontalIndex += 1) {
+    const left = horizontal[horizontalIndex];
+    const right = horizontal[horizontalIndex + 1];
+    if (right - left <= COVERAGE_EPSILON) continue;
+    for (let verticalIndex = 0; verticalIndex < vertical.length - 1; verticalIndex += 1) {
+      const bottom = vertical[verticalIndex];
+      const top = vertical[verticalIndex + 1];
+      if (top - bottom <= COVERAGE_EPSILON) continue;
+      const horizontalMidpoint = (left + right) / 2;
+      const verticalMidpoint = (bottom + top) / 2;
+      const covered = rectangles.some((rectangle) => (
+        horizontalMidpoint >= rectangle[0] - COVERAGE_EPSILON
+        && horizontalMidpoint <= rectangle[2] + COVERAGE_EPSILON
+        && verticalMidpoint >= rectangle[1] - COVERAGE_EPSILON
+        && verticalMidpoint <= rectangle[3] + COVERAGE_EPSILON
+      ));
+      if (!covered) return false;
+    }
+  }
+  return true;
+}
+
+export function collisionBoxesCoverFace(boxes: CollisionBox[], face: CollisionFace) {
+  const rectangles: FaceRectangle[] = [];
+  for (const box of boxes) {
+    let touchesFace = false;
+    let rectangle: FaceRectangle;
+    if (face === "up" || face === "down") {
+      touchesFace = face === "up" ? box[4] >= 1 - COVERAGE_EPSILON : box[1] <= COVERAGE_EPSILON;
+      rectangle = [box[0], box[2], box[3], box[5]];
+    } else if (face === "east" || face === "west") {
+      touchesFace = face === "east" ? box[3] >= 1 - COVERAGE_EPSILON : box[0] <= COVERAGE_EPSILON;
+      rectangle = [box[2], box[1], box[5], box[4]];
+    } else {
+      touchesFace = face === "south" ? box[5] >= 1 - COVERAGE_EPSILON : box[2] <= COVERAGE_EPSILON;
+      rectangle = [box[0], box[1], box[3], box[4]];
+    }
+    const normalized = rectangle.map(clampUnit) as FaceRectangle;
+    if (
+      touchesFace
+      && normalized[2] - normalized[0] > COVERAGE_EPSILON
+      && normalized[3] - normalized[1] > COVERAGE_EPSILON
+    ) {
+      rectangles.push(normalized);
+    }
+  }
+  return rectanglesCoverUnitFace(rectangles);
+}
 
 function blockDefinitions(versionPack: VersionPack) {
   const cached = blockDefinitionCache.get(versionPack);

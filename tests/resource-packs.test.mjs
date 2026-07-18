@@ -4,10 +4,12 @@ import { readFile } from "node:fs/promises";
 
 import {
   blockStateOffset,
+  collisionBoxesCoverFace,
   collisionBoxesForBlock,
   defaultBlockProperties,
 } from "../lib/minecraft/block-shapes.ts";
 import {
+  findResourceArchiveRoot,
   parseResourcePackMetadata,
   resourcePackCompatibility,
 } from "../lib/minecraft/resource-packs.ts";
@@ -60,6 +62,24 @@ test("reports resource-pack compatibility against the active Java format", () =>
   assert.equal(resourcePackCompatibility(pack, 22), "newer");
 });
 
+test("uses the assets root for client JARs with only nested data-pack metadata", () => {
+  const files = new Map([
+    ["assets/minecraft/models/block/block.json", new Uint8Array()],
+    ["data/minecraft/datapacks/redstone_experiments/pack.mcmeta", new Uint8Array()],
+  ]);
+
+  assert.equal(findResourceArchiveRoot(files), "");
+});
+
+test("keeps the wrapper directory for ordinary resource-pack ZIPs", () => {
+  const files = new Map([
+    ["My Pack/pack.mcmeta", new Uint8Array()],
+    ["My Pack/assets/minecraft/models/block/cube.json", new Uint8Array()],
+  ]);
+
+  assert.equal(findResourceArchiveRoot(files), "My Pack/");
+});
+
 test("resolves state-id ordering and versioned slab collision shapes", async () => {
   const versionPack = JSON.parse(await readFile(new URL("../public/version-packs/1.21.4.json", import.meta.url), "utf8"));
   const shapePack = JSON.parse(await readFile(new URL("../public/shape-packs/1.21.4.json", import.meta.url), "utf8"));
@@ -89,4 +109,21 @@ test("resolves state-id ordering and versioned slab collision shapes", async () 
 
   assert.deepEqual(bottom, [[0, 0, 0, 1, 0.5, 1]]);
   assert.deepEqual(top, [[0, 0.5, 0, 1, 1, 1]]);
+});
+
+test("culls only faces completely covered by a neighboring collision shape", () => {
+  const fullCube = [[0, 0, 0, 1, 1, 1]];
+  const bottomSlab = [[0, 0, 0, 1, 0.5, 1]];
+  const topSlab = [[0, 0.5, 0, 1, 1, 1]];
+  const fencePost = [[0.375, 0, 0.375, 0.625, 1.5, 0.625]];
+
+  for (const face of ["up", "down", "west", "east", "north", "south"]) {
+    assert.equal(collisionBoxesCoverFace(fullCube, face), true);
+    assert.equal(collisionBoxesCoverFace(fencePost, face), false);
+  }
+  assert.equal(collisionBoxesCoverFace(bottomSlab, "down"), true);
+  assert.equal(collisionBoxesCoverFace(bottomSlab, "up"), false);
+  assert.equal(collisionBoxesCoverFace(bottomSlab, "east"), false);
+  assert.equal(collisionBoxesCoverFace(topSlab, "up"), true);
+  assert.equal(collisionBoxesCoverFace(topSlab, "down"), false);
 });

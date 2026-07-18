@@ -70,9 +70,9 @@ import {
   type BuilderUIMessage,
   type CommitSourceOutput,
 } from "@/lib/ai/agent-protocol";
-import { loadAgentSession, saveAgentSession } from "@/lib/ai/agent-persistence";
+import { clearAgentSession } from "@/lib/ai/agent-persistence";
 import { preflightBuilderSource } from "@/lib/ai/source-preflight";
-import { DEFAULT_SOURCE } from "@/lib/minecraft/demo-source";
+import { DEFAULT_SOURCE, emptySource } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
 import { executeBuilderSource } from "@/lib/minecraft/runner";
 import {
@@ -103,13 +103,15 @@ type AgentRunState = {
   error?: string;
 };
 
-const EMPTY_WORLD: WorldDocument = {
-  name: "空白项目",
-  version: "1.21.11",
-  author: "LLM MC Builder",
-  description: "",
-  blocks: [],
-};
+function createEmptyWorld(version: string): WorldDocument {
+  return {
+    name: "空白项目",
+    version,
+    author: "LLM MC Builder",
+    description: "",
+    blocks: [],
+  };
+}
 
 const quickPrompts = ["生成一座云杉生存小屋", "设计可调延迟红石链", "建造一座铜顶瞭望塔"];
 
@@ -182,7 +184,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 export function BuilderWorkbench() {
   const [source, setSource] = useState(DEFAULT_SOURCE);
-  const [world, setWorld] = useState<WorldDocument>(EMPTY_WORLD);
+  const [world, setWorld] = useState<WorldDocument>(() => createEmptyWorld("1.21.11"));
   const [version, setVersion] = useState("1.21.11");
   const [pack, setPack] = useState<VersionPack | null>(null);
   const [packStatus, setPackStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -221,10 +223,7 @@ export function BuilderWorkbench() {
   const addToolOutputRef = useRef<ChatAddToolOutputFunction<BuilderUIMessage> | null>(null);
   const packRef = useRef<VersionPack | null>(null);
   const sourceSnapshotsRef = useRef<Record<string, { source: string; version: string }>>({});
-  const persistenceReadyRef = useRef(false);
-  const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const initialVersionRef = useRef(version);
-  const restoredSourceToRunRef = useRef<string | null>(null);
+  const workspaceRevisionRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
@@ -268,10 +267,12 @@ export function BuilderWorkbench() {
   }, []);
 
   const runWith = useCallback(async (nextSource: string, nextPack: VersionPack) => {
+    const workspaceRevision = workspaceRevisionRef.current;
     setRunning(true);
     setNotice("QuickJS 沙箱正在执行建筑脚本…");
     try {
       const result = await evaluateSource(nextSource, nextPack);
+      if (workspaceRevision !== workspaceRevisionRef.current) return [];
       setDiagnostics(result.diagnostics);
       if (result.world) {
         setWorld(result.world);
@@ -287,7 +288,7 @@ export function BuilderWorkbench() {
       }
       return result.errors;
     } finally {
-      setRunning(false);
+      if (workspaceRevision === workspaceRevisionRef.current) setRunning(false);
     }
   }, [evaluateSource]);
 
@@ -334,11 +335,6 @@ export function BuilderWorkbench() {
         packRef.current = loaded;
         setPackStatus("ready");
         setNotice(`Minecraft ${version} 已就绪 · ${loaded.blockCount.toLocaleString()} 个版本方块可用`);
-        const restoredSource = restoredSourceToRunRef.current;
-        if (restoredSource) {
-          restoredSourceToRunRef.current = null;
-          void runWith(restoredSource, loaded);
-        }
       })
       .catch((error) => {
         if (cancelled) return;
@@ -348,7 +344,7 @@ export function BuilderWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [runWith, version]);
+  }, [version]);
 
   const {
     messages,
@@ -698,72 +694,32 @@ export function BuilderWorkbench() {
   };
 
   useEffect(() => {
-    let cancelled = false;
-    void loadAgentSession()
-      .then((session) => {
-        if (cancelled) return;
-        if (session) {
-          const restoredMessages = session.messages.filter((message) => !message.parts.some((part) => (
-            part.type === "tool-commit_source"
-            && (part.state === "input-available" || part.state === "input-streaming")
-          )));
-          sourceSnapshotsRef.current = session.sourceSnapshots;
-          setMessages(restoredMessages);
-          setSource(session.source);
-          const restoredEntry = VERSION_OPTIONS.find((item) => item.id === session.version);
-          if (session.version !== initialVersionRef.current) {
-            setPack(null);
-            packRef.current = null;
-            setPackStatus(restoredEntry && !restoredEntry.experimental ? "loading" : "error");
-            setPackError(restoredEntry && !restoredEntry.experimental ? "" : `${session.version} 的完整方块版本包尚未发布`);
-          }
-          setVersion(session.version);
-          if (packRef.current?.gameVersion === session.version) {
-            void runWith(session.source, packRef.current);
-          } else if (restoredEntry && !restoredEntry.experimental) {
-            restoredSourceToRunRef.current = session.source;
-          }
-          setNotice(`已恢复本地 Agent 会话 · ${restoredMessages.length} 条消息`);
-        }
-        persistenceReadyRef.current = true;
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        persistenceReadyRef.current = true;
-        setNotice(`无法恢复本地 Agent 会话：${error instanceof Error ? error.message : String(error)}`);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [runWith, setMessages]);
+    // 对话和源码只存在于当前页面生命周期；启动时删除旧版本留下的会话记录。
+    void clearAgentSession().catch(() => undefined);
+  }, []);
 
-  useEffect(() => {
-    if (!persistenceReadyRef.current) return;
-    if (persistenceTimerRef.current) clearTimeout(persistenceTimerRef.current);
-    persistenceTimerRef.current = setTimeout(() => {
-      void saveAgentSession({
-        messages,
-        source,
-        version,
-        sourceSnapshots: sourceSnapshotsRef.current,
-      }).catch((error) => {
-        setNotice(`Agent 会话持久化失败：${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, 250);
-    return () => {
-      if (persistenceTimerRef.current) clearTimeout(persistenceTimerRef.current);
-    };
-  }, [messages, source, version]);
-
-  const startNewConversation = async () => {
+  const startNewDrawing = async () => {
     await cancelAgentRun("正在结束当前 Agent 运行…");
+    workspaceRevisionRef.current += 1;
     sourceSnapshotsRef.current = {};
     setMessages([]);
+    setSource(emptySource(version));
+    setWorld(createEmptyWorld(version));
+    setDiagnostics([]);
+    setActiveTab("preview");
+    setRunning(false);
     setPrompt("");
     setAttachments([]);
     setEditingMessageId(null);
+    setEditingText("");
+    setSelected(null);
+    setXray(false);
+    setRedstoneOnly(false);
+    setLayer(null);
     setAgentRun({ id: null, status: "idle", attempt: 0, maxAttempts: 1 });
-    setNotice("已开启新对话 · 当前建筑源码与预览保持不变");
+    if (imageInputRef.current) imageInputRef.current.value = "";
+    void clearAgentSession().catch(() => undefined);
+    setNotice("已新建空白绘画 · 对话、源码、校验与预览已清空");
   };
 
   const updateModelSettings = (profiles: ModelProfile[], nextActiveProfileId: string) => {
@@ -891,12 +847,12 @@ export function BuilderWorkbench() {
             <div className="panel-heading-actions">
               <button
                 className="new-chat-button"
-                onClick={() => void startNewConversation()}
-                title="开启新对话（保留当前建筑）"
-                aria-label="开启新对话（保留当前建筑）"
+                onClick={() => void startNewDrawing()}
+                title="新建绘画并清空对话、源码与预览"
+                aria-label="新建绘画并清空对话、源码与预览"
               >
                 <MessageSquarePlus size={14} />
-                <span>新对话</span>
+                <span>新会话</span>
               </button>
               <button className="model-badge" onClick={() => setSettingsOpen(true)} title={`${modelSettings.model} · 点击配置`}>
                 <span className="model-status-dot" /><Sparkles size={12} /> {providerLabel(modelSettings)}
