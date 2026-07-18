@@ -22,6 +22,7 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   PanelRight,
+  PackageOpen,
   Pencil,
   Play,
   Redo2,
@@ -53,6 +54,7 @@ const Viewport3D = dynamic(
   { ssr: false }
 );
 import { ModelSettingsDialog } from "./model-settings-dialog";
+import { ResourcePackDialog } from "./resource-pack-dialog";
 import {
   DEFAULT_MODEL_SETTINGS,
   loadModelProfiles,
@@ -73,6 +75,11 @@ import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { DEFAULT_SOURCE } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
 import { executeBuilderSource } from "@/lib/minecraft/runner";
+import {
+  listResourcePacks,
+  saveResourcePackConfiguration,
+  type ResourcePackSummary,
+} from "@/lib/minecraft/resource-packs";
 import type {
   Diagnostic,
   PlacedBlock,
@@ -191,6 +198,8 @@ export function BuilderWorkbench() {
   const [layer, setLayer] = useState<number | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [resourcePackOpen, setResourcePackOpen] = useState(false);
+  const [resourcePacks, setResourcePacks] = useState<ResourcePackSummary[]>([]);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(DEFAULT_MODEL_SETTINGS);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([
     { id: "default", name: "默认配置", settings: DEFAULT_MODEL_SETTINGS, updatedAt: 0 },
@@ -293,6 +302,20 @@ export function BuilderWorkbench() {
       setModelSettings(active.settings);
     });
     return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    listResourcePacks()
+      .then((loaded) => {
+        if (!cancelled) setResourcePacks(loaded);
+      })
+      .catch((error) => {
+        if (!cancelled) setNotice(`无法读取本地资源包：${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -755,6 +778,16 @@ export function BuilderWorkbench() {
     setNotice(`模型预设已保存 · ${active.name} · ${providerLabel(active.settings)} · ${active.settings.model}`);
   };
 
+  const applyResourcePacks = useCallback(async (nextPacks: ResourcePackSummary[]) => {
+    await saveResourcePackConfiguration(nextPacks);
+    const refreshed = await listResourcePacks();
+    setResourcePacks(refreshed);
+    const enabledCount = refreshed.filter((item) => item.enabled).length;
+    setNotice(enabledCount > 0
+      ? `资源包栈已更新 · ${enabledCount} 个资源包生效 · 顶部优先`
+      : "资源包栈已清空 · 使用真实形状与程序化材质");
+  }, []);
+
   const exportLitematic = async () => {
     if (!pack || blockingErrors > 0 || world.blocks.length === 0) return;
     setExporting(true);
@@ -784,6 +817,14 @@ export function BuilderWorkbench() {
         profiles={modelProfiles}
         activeProfileId={activeProfileId}
         onSave={updateModelSettings}
+      />
+      <ResourcePackDialog
+        open={resourcePackOpen}
+        onOpenChange={setResourcePackOpen}
+        packs={resourcePacks}
+        gameVersion={version}
+        targetFormat={pack?.resourcePackFormat ?? null}
+        onApply={applyResourcePacks}
       />
       <header className="topbar">
         <div className="brand-lockup">
@@ -822,6 +863,10 @@ export function BuilderWorkbench() {
         </div>
 
         <div className="top-actions">
+          <button className="icon-button resource-pack-trigger" onClick={() => setResourcePackOpen(true)} title="资源包" aria-label="打开资源包管理器">
+            <PackageOpen size={16} />
+            {resourcePacks.some((item) => item.enabled) && <span>{resourcePacks.filter((item) => item.enabled).length}</span>}
+          </button>
           <button className="icon-button model-settings-trigger" onClick={() => setSettingsOpen(true)} title="模型与生成设置" aria-label="打开模型与生成设置"><Settings2 size={16} /></button>
           <button className="icon-button" disabled title="撤销即将加入历史层"><Undo2 size={16} /></button>
           <button className="icon-button" disabled title="重做即将加入历史层"><Redo2 size={16} /></button>
@@ -1090,7 +1135,16 @@ export function BuilderWorkbench() {
           <div className="workspace-content">
             {activeTab === "preview" && (
               <div className="preview-surface">
-                <Viewport3D world={world} xray={xray} redstoneOnly={redstoneOnly} layer={layer} selected={selected} onSelect={setSelected} />
+                <Viewport3D
+                  world={world}
+                  xray={xray}
+                  redstoneOnly={redstoneOnly}
+                  layer={layer}
+                  selected={selected}
+                  versionPack={pack}
+                  resourcePacks={resourcePacks}
+                  onSelect={setSelected}
+                />
                 <div className="preview-overlay top-left">
                   <span className="axis x">X</span><span className="axis y">Y</span><span className="axis z">Z</span>
                   <span>{stats.size.join(" × ")} blocks</span>

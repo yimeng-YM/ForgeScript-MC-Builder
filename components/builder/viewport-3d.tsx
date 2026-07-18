@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { PlacedBlock, WorldDocument } from "@/lib/minecraft/types";
+import { loadCollisionShapePack, type CollisionShapePack } from "@/lib/minecraft/block-shapes";
+import { createPreviewMeshes } from "@/lib/minecraft/preview-mesher";
+import { loadRenderResources, type LoadedRenderResources } from "@/lib/minecraft/render-resources";
+import type { ResourcePackSummary } from "@/lib/minecraft/resource-packs";
+import type { PlacedBlock, VersionPack, WorldDocument } from "@/lib/minecraft/types";
 
 type Viewport3DProps = {
   world: WorldDocument;
@@ -11,6 +15,8 @@ type Viewport3DProps = {
   redstoneOnly: boolean;
   layer: number | null;
   selected: PlacedBlock | null;
+  versionPack: VersionPack | null;
+  resourcePacks: ResourcePackSummary[];
   onSelect: (block: PlacedBlock | null) => void;
 };
 
@@ -21,48 +27,48 @@ type ViewportRuntime = {
   controls: OrbitControls;
   content: THREE.Group;
   selection: THREE.Group;
-  meshes: THREE.InstancedMesh[];
+  meshes: THREE.Object3D[];
   framedWorld: WorldDocument | null;
 };
-
-function blockColor(id: string): number {
-  if (/redstone|repeater|comparator|observer|piston|lever|button/.test(id)) return 0xc2473f;
-  if (/copper/.test(id)) return /oxidized/.test(id) ? 0x4e9180 : 0xb66b48;
-  if (/glass|ice/.test(id)) return 0x8ac4d4;
-  if (/spruce|dark_oak/.test(id)) return 0x59402f;
-  if (/oak|planks|log|wood/.test(id)) return 0x9b7547;
-  if (/deepslate|blackstone/.test(id)) return 0x45464e;
-  if (/stone|cobble|andesite|brick/.test(id)) return 0x777a7b;
-  if (/grass|moss|leaves|vine/.test(id)) return 0x5f8648;
-  if (/water/.test(id)) return 0x3b73b9;
-  if (/lava|magma/.test(id)) return 0xe26b2d;
-  if (/sand|sandstone/.test(id)) return 0xd2bd7e;
-  if (/white|quartz|snow/.test(id)) return 0xdadbd4;
-  if (/lantern|torch|lamp/.test(id)) return 0xe2a33c;
-  let hash = 2166136261;
-  for (const character of id) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
-  const color = new THREE.Color().setHSL(((hash >>> 0) % 360) / 360, 0.28, 0.48);
-  return color.getHex();
-}
 
 function disposeGroup(group: THREE.Group) {
   const geometries = new Set<THREE.BufferGeometry>();
   const materials = new Set<THREE.Material>();
+  const textures = new Set<THREE.Texture>();
   group.traverse((object) => {
     if (!(object instanceof THREE.Mesh || object instanceof THREE.LineSegments)) return;
     geometries.add(object.geometry);
     const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
-    for (const material of objectMaterials) materials.add(material);
+    for (const material of objectMaterials) {
+      materials.add(material);
+      if (material instanceof THREE.MeshStandardMaterial && material.map) textures.add(material.map);
+    }
   });
   group.clear();
   for (const geometry of geometries) geometry.dispose();
   for (const material of materials) material.dispose();
+  for (const texture of textures) texture.dispose();
 }
 
-export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelect }: Viewport3DProps) {
+export function Viewport3D({
+  world,
+  xray,
+  redstoneOnly,
+  layer,
+  selected,
+  versionPack,
+  resourcePacks,
+  onSelect,
+}: Viewport3DProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ViewportRuntime | null>(null);
   const onSelectRef = useRef(onSelect);
+  const [shapePack, setShapePack] = useState<CollisionShapePack | null>(null);
+  const [renderResources, setRenderResources] = useState<LoadedRenderResources | null>(null);
+  const [resourceState, setResourceState] = useState<{
+    status: "fallback" | "loading" | "ready" | "error";
+    message: string;
+  }>({ status: "fallback", message: "真实形状 · 程序化材质" });
 
   useEffect(() => {
     onSelectRef.current = onSelect;
@@ -120,12 +126,18 @@ export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelec
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects(runtime.meshes, false)[0];
-      if (!hit || hit.instanceId === undefined) {
+      if (!hit) {
         onSelectRef.current(null);
         return;
       }
-      const blocks = (hit.object.userData.blocks ?? []) as PlacedBlock[];
-      onSelectRef.current(blocks[hit.instanceId] ?? null);
+      if (hit.instanceId !== undefined) {
+        const blocks = (hit.object.userData.blocks ?? []) as PlacedBlock[];
+        onSelectRef.current(blocks[hit.instanceId] ?? null);
+        return;
+      }
+      const triangleBlocks = (hit.object.userData.triangleBlocks ?? []) as PlacedBlock[];
+      const faceIndex = hit.faceIndex;
+      onSelectRef.current(faceIndex === undefined || faceIndex === null ? null : triangleBlocks[faceIndex] ?? null);
     };
     renderer.domElement.addEventListener("pointerdown", handlePointer);
 
@@ -164,6 +176,61 @@ export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelec
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    loadCollisionShapePack(world.version)
+      .then((loaded) => {
+        if (!cancelled) setShapePack(loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setShapePack(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [world.version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const enabled = resourcePacks.filter((item) => item.enabled);
+    if (!versionPack || enabled.length === 0) {
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setRenderResources(null);
+        setResourceState({ status: "fallback", message: "真实形状 · 程序化材质" });
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    queueMicrotask(() => {
+      if (!cancelled) setResourceState({ status: "loading", message: `正在合并 ${enabled.length} 个资源包…` });
+    });
+    loadRenderResources(resourcePacks, versionPack.resourcePackFormat ?? null, versionPack)
+      .then((loaded) => {
+        if (cancelled) return;
+        setRenderResources(loaded);
+        setResourceState(loaded
+          ? {
+              status: "ready",
+              message: `${loaded.packNames.length} 个资源包 · ${loaded.textureCount.toLocaleString()} 张纹理`,
+            }
+          : { status: "fallback", message: "真实形状 · 程序化材质" });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRenderResources(null);
+        setResourceState({
+          status: "error",
+          message: `资源包加载失败：${error instanceof Error ? error.message : String(error)}`,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resourcePacks, versionPack]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     if (!runtime) return;
 
@@ -174,41 +241,22 @@ export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelec
     const sampled = visible.length > 12_000
       ? visible.filter((_, index) => index % Math.ceil(visible.length / 12_000) === 0)
       : visible;
-    const groups = new Map<number, PlacedBlock[]>();
-    for (const block of sampled) {
-      const color = blockColor(block.state.id);
-      const group = groups.get(color) ?? [];
-      group.push(block);
-      groups.set(color, group);
-    }
-
     const bounds = new THREE.Box3();
-    const matrix = new THREE.Matrix4();
-    const meshes: THREE.InstancedMesh[] = [];
-    for (const [color, blocks] of groups) {
-      const geometry = new THREE.BoxGeometry(0.94, 0.94, 0.94);
-      const translucent = blocks.some((block) => /glass|water|ice/.test(block.state.id));
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.82,
-        metalness: /copper|iron|gold/.test(blocks[0]?.state.id ?? "") ? 0.28 : 0.02,
-        transparent: xray || translucent,
-        opacity: xray ? 0.34 : translucent ? 0.56 : 1,
+    for (const block of sampled) bounds.expandByPoint(new THREE.Vector3(block.x, block.y, block.z));
+    if (versionPack) {
+      const result = createPreviewMeshes({
+        blocks: sampled,
+        canCull: sampled.length === visible.length,
+        shapePack,
+        versionPack,
+        resources: renderResources?.resources ?? null,
+        xray,
       });
-      const mesh = new THREE.InstancedMesh(geometry, material, blocks.length);
-      mesh.userData.blocks = blocks;
-      mesh.castShadow = !xray;
-      mesh.receiveShadow = true;
-      blocks.forEach((block, index) => {
-        matrix.makeTranslation(block.x, block.y, block.z);
-        mesh.setMatrixAt(index, matrix);
-        bounds.expandByPoint(new THREE.Vector3(block.x, block.y, block.z));
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      meshes.push(mesh);
-      runtime.content.add(mesh);
+      runtime.meshes = result.selectable;
+      if (result.objects.length > 0) runtime.content.add(...result.objects);
+    } else {
+      runtime.meshes = [];
     }
-    runtime.meshes = meshes;
 
     const size = bounds.isEmpty() ? new THREE.Vector3(12, 8, 12) : bounds.getSize(new THREE.Vector3());
     const center = bounds.isEmpty() ? new THREE.Vector3(0, 2, 0) : bounds.getCenter(new THREE.Vector3());
@@ -227,7 +275,7 @@ export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelec
       runtime.controls.update();
       runtime.framedWorld = world;
     }
-  }, [world, xray, redstoneOnly, layer]);
+  }, [world, xray, redstoneOnly, layer, versionPack, shapePack, renderResources]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -242,5 +290,13 @@ export function Viewport3D({ world, xray, redstoneOnly, layer, selected, onSelec
     runtime.selection.add(lines);
   }, [selected]);
 
-  return <div className="viewport-host" ref={hostRef} aria-label="Minecraft 结构三维预览" />;
+  return (
+    <div className="viewport-frame">
+      <div className="viewport-host" ref={hostRef} aria-label="Minecraft 结构三维预览" />
+      <div className={`render-resource-state ${resourceState.status}`} aria-live="polite">
+        <span />
+        {resourceState.message}
+      </div>
+    </div>
+  );
 }

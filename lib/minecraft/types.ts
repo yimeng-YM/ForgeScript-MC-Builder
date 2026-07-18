@@ -25,6 +25,8 @@ export type WorldDocument = {
 export type BlockPropertySchema = {
   name: string;
   values: string[];
+  /** Values in Minecraft's numeric state-id order. Boolean states are true, false. */
+  stateIdValues?: string[];
 };
 
 export type BlockDefinition = {
@@ -43,6 +45,7 @@ export type VersionPack = {
   gameVersion: string;
   dataVersion: number;
   protocolVersion: number;
+  resourcePackFormat?: number | null;
   generatedFrom: string;
   blockCount: number;
   blocks: BlockDefinition[];
@@ -73,4 +76,3 @@ export type WorldStats = {
   size: [number, number, number];
   materials: Array<{ id: string; count: number }>;
 };
-

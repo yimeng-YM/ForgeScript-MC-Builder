@@ -20,7 +20,26 @@ const targets = [
 ];
 
 const outputDir = path.resolve("public/version-packs");
+const shapeOutputDir = path.resolve("public/shape-packs");
 await mkdir(outputDir, { recursive: true });
+await mkdir(shapeOutputDir, { recursive: true });
+
+const resourcePackFormats = {
+  "1.12.2": 3,
+  "1.13.2": 4,
+  "1.16.5": 6,
+  "1.18.2": 8,
+  "1.19.2": 9,
+  "1.19.4": 13,
+  "1.20.1": 15,
+  "1.20.4": 22,
+  "1.20.6": 32,
+  "1.21.1": 34,
+  "1.21.4": 46,
+  "1.21.8": 64,
+  "1.21.10": 69,
+  "1.21.11": 75,
+};
 
 const catalog = [];
 
@@ -47,6 +66,11 @@ for (const version of targets) {
           : Array.from({ length: state.num_values ?? 0 }, (_, index) =>
               String(index),
             )),
+      stateIdValues:
+        state.values?.map(String) ??
+        (state.type === "bool"
+          ? ["true", "false"]
+          : Array.from({ length: state.num_values ?? 0 }, (_, index) => String(index))),
     })),
   }));
 
@@ -55,6 +79,7 @@ for (const version of targets) {
     gameVersion: version,
     dataVersion: data.version.dataVersion,
     protocolVersion: data.version.version,
+    resourcePackFormat: resourcePackFormats[version] ?? null,
     generatedFrom: `minecraft-data@${minecraftData.version ?? "current"}`,
     blockCount: blocks.length,
     blocks,
@@ -62,6 +87,17 @@ for (const version of targets) {
 
   const encoded = `${JSON.stringify(pack)}\n`;
   await writeFile(path.join(outputDir, `${version}.json`), encoded, "utf8");
+  const shapePack = {
+    format: 1,
+    gameVersion: version,
+    blocks: data.blockCollisionShapes?.blocks ?? {},
+    shapes: data.blockCollisionShapes?.shapes ?? {},
+  };
+  await writeFile(
+    path.join(shapeOutputDir, `${version}.json`),
+    `${JSON.stringify(shapePack)}\n`,
+    "utf8",
+  );
   catalog.push({
     id: version,
     dataVersion: pack.dataVersion,

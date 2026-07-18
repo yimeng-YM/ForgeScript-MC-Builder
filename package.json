@@ -26,6 +26,8 @@
     "ai": "^7.0.30",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "deepslate": "^0.26.0",
+    "fflate": "^0.8.2",
     "lucide-react": "^1.25.0",
     "minecraft-data": "^3.111.0",
     "next": "16.2.6",
