@@ -247,9 +247,40 @@ export function BuilderWorkbench() {
 
             setNotice(`自动检测到阻断错误，正在发起第 ${autoFixCountRef.current}/3 次自动修正…`);
 
-            // 自动追问
+            // 自动追问，并标记该消息为自动修正类型，以在 UI 渲染中过滤掉
             setTimeout(() => {
-              void sendMessage({ text: retryMessage }, { body: { version, source: nextSource, settings: modelSettings } });
+              void sendMessage(
+                { text: retryMessage },
+                {
+                  body: {
+                    version,
+                    source: nextSource,
+                    settings: modelSettings,
+                  },
+                  headers: {
+                    // 自定义特殊标头可以在传输拦截或直接作为 metadata 存入消息
+                  },
+                }
+              ).then(() => {
+                // 将最新添加的 user 消息标记为 isAutoFix，从而从前端 UI 中隐藏
+                setMessages((current) => {
+                  const copy = [...current];
+                  // 寻找最后一条 user 消息并添加 metadata.isAutoFix 标记
+                  for (let i = copy.length - 1; i >= 0; i--) {
+                    if (copy[i].role === "user") {
+                      copy[i] = {
+                        ...copy[i],
+                        metadata: {
+                          ...(copy[i].metadata || {}),
+                          isAutoFix: true,
+                        },
+                      };
+                      break;
+                    }
+                  }
+                  return copy;
+                });
+              });
             }, 1000);
           } else {
             setNotice(`自动修正已达 3 次上限，仍存在阻断错误。请手动修改或更换提示词。`);
@@ -430,43 +461,49 @@ export function BuilderWorkbench() {
                 </MessageContent>
               </Message>
 
-              {messages.map((message) => (
-                <Message from={message.role} key={message.id} className="builder-message">
-                  {message.role === "assistant" && <div className="assistant-avatar"><WandSparkles size={15} /></div>}
-                  <MessageContent className={message.role === "user" ? "user-message-content" : "assistant-message-content"}>
-                    {/* 渲染模型推理过程/思考链 */}
-                    {message.parts.some(p => p.type === "reasoning") && (
-                      <Collapsible className="reasoning-collapsible mb-2 border border-[#d8d5cb] rounded-md bg-[#f6f5f0] overflow-hidden">
-                        <CollapsibleTrigger className="flex w-full items-center justify-between p-2 text-xs font-semibold text-[#6a716d] hover:bg-[#e8e5dc]/50 transition-colors">
-                          <span className="flex items-center gap-1.5"><ChevronRight size={12} className="transition-transform group-data-[state=open]:rotate-90" />查看 AI 思考过程</span>
-                        </CollapsibleTrigger>
-                        <CollapsibleContent className="p-3 border-t border-[#d8d5cb] text-xs font-mono text-[#555] bg-white whitespace-pre-wrap leading-relaxed max-h-[220px] overflow-y-auto">
-                          {message.parts
-                            .filter(p => p.type === "reasoning")
-                            .map(p => (p as { text: string }).text)
-                            .join("")}
-                        </CollapsibleContent>
-                      </Collapsible>
-                    )}
+              {messages.map((message) => {
+                // 如果是隐藏的自动修正消息，则在渲染时完全跳过不展示在 UI 中
+                const isAutoFixMessage = message.role === "user" && message.metadata && (message.metadata as { isAutoFix?: boolean }).isAutoFix;
+                if (isAutoFixMessage) return null;
 
-                    {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
-                    {message.parts.map((part, index) => {
-                      if (part.type !== "tool-commit_source") return null;
-                      return (
-                        <Tool key={`${message.id}-${index}`} className="source-tool" defaultOpen>
-                          <ToolHeader type={part.type} state={part.state} title="建筑源码变更" />
-                          <ToolContent>
-                            <div className="change-summary">
-                              <FileCode2 size={16} />
-                              <div><strong>完整源码已提交</strong><span>将在 QuickJS 隔离环境中执行并校验</span></div>
-                            </div>
-                          </ToolContent>
-                        </Tool>
-                      );
-                    })}
-                  </MessageContent>
-                </Message>
-              ))}
+                return (
+                  <Message from={message.role} key={message.id} className="builder-message">
+                    {message.role === "assistant" && <div className="assistant-avatar"><WandSparkles size={15} /></div>}
+                    <MessageContent className={message.role === "user" ? "user-message-content" : "assistant-message-content"}>
+                      {/* 渲染模型推理过程/思考链 */}
+                      {message.parts.some(p => p.type === "reasoning") && (
+                        <Collapsible className="reasoning-collapsible mb-2 border border-[#d8d5cb] rounded-md bg-[#f6f5f0] overflow-hidden">
+                          <CollapsibleTrigger className="flex w-full items-center justify-between p-2 text-xs font-semibold text-[#6a716d] hover:bg-[#e8e5dc]/50 transition-colors">
+                            <span className="flex items-center gap-1.5"><ChevronRight size={12} className="transition-transform group-data-[state=open]:rotate-90" />查看 AI 思考过程</span>
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="p-3 border-t border-[#d8d5cb] text-xs font-mono text-[#555] bg-white whitespace-pre-wrap leading-relaxed max-h-[220px] overflow-y-auto">
+                            {message.parts
+                              .filter(p => p.type === "reasoning")
+                              .map(p => (p as { text: string }).text)
+                              .join("")}
+                          </CollapsibleContent>
+                        </Collapsible>
+                      )}
+
+                      {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
+                      {message.parts.map((part, index) => {
+                        if (part.type !== "tool-commit_source") return null;
+                        return (
+                          <Tool key={`${message.id}-${index}`} className="source-tool" defaultOpen>
+                            <ToolHeader type={part.type} state={part.state} title="建筑源码变更" />
+                            <ToolContent>
+                              <div className="change-summary">
+                                <FileCode2 size={16} />
+                                <div><strong>完整源码已提交</strong><span>将在 QuickJS 隔离环境中执行并校验</span></div>
+                              </div>
+                            </ToolContent>
+                          </Tool>
+                        );
+                      })}
+                    </MessageContent>
+                  </Message>
+                );
+              })}
 
               {(chatStatus === "submitted" || chatStatus === "streaming") && (
                 <div className="thinking-row"><LoaderCircle size={14} className="spin" /> 正在查询方块状态并编写结构…</div>
