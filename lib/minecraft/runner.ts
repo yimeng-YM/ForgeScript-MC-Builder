@@ -22,11 +22,17 @@ const SDK_BOOTSTRAP = String.raw`
     return [integer(value[0], label + ".x"), integer(value[1], label + ".y"), integer(value[2], label + ".z")];
   };
   const normalizeState = (state) => {
-    if (typeof state === "string") return { id: state, properties: {} };
+    if (typeof state === "string") {
+      let id = state;
+      if (!id.includes(":")) id = "minecraft:" + id;
+      return { id, properties: {} };
+    }
     if (!state || typeof state.id !== "string") throw new TypeError("block state requires a namespaced id");
+    let id = state.id;
+    if (!id.includes(":")) id = "minecraft:" + id;
     const properties = {};
     for (const [name, value] of Object.entries(state.properties || {})) properties[name] = String(value);
-    return { id: state.id, properties, nbt: state.nbt };
+    return { id, properties, nbt: state.nbt };
   };
   const key = (region, x, y, z) => region + "\u0000" + x + "," + y + "," + z;
   const put = (region, origin, position, state) => {

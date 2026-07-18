@@ -8,6 +8,7 @@ import {
   Braces,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   Code2,
   Cuboid,
@@ -28,6 +29,7 @@ import {
   WandSparkles,
   Zap,
 } from "lucide-react";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import {
   Conversation,
   ConversationContent,
@@ -137,6 +139,7 @@ export function BuilderWorkbench() {
   const [modelSettings, setModelSettings] = useState<ModelSettings>(DEFAULT_MODEL_SETTINGS);
   const [notice, setNotice] = useState("正在载入版本化方块注册表…");
   const executionTimeoutRef = useRef(DEFAULT_MODEL_SETTINGS.builder.executionTimeoutMs);
+  const autoFixCountRef = useRef(0);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
   const maxY = useMemo(
@@ -158,23 +161,29 @@ export function BuilderWorkbench() {
       setWorld(nextWorld);
       setDiagnostics(nextDiagnostics);
       setSelected(null);
-      setNotice(
-        nextDiagnostics.some((item) => item.severity === "error")
-          ? `运行完成，但发现 ${nextDiagnostics.filter((item) => item.severity === "error").length} 个阻断错误`
-          : `运行成功 · ${nextWorld.blocks.length.toLocaleString()} 个方块 · ${nextPack.blockCount.toLocaleString()} 个版本方块可用`,
-      );
+
+      const errorDiagnostics = nextDiagnostics.filter((item) => item.severity === "error");
+      if (errorDiagnostics.length > 0) {
+        setNotice(`运行完成，但发现 ${errorDiagnostics.length} 个阻断错误`);
+        return errorDiagnostics;
+      } else {
+        setNotice(`运行成功 · ${nextWorld.blocks.length.toLocaleString()} 个方块 · ${nextPack.blockCount.toLocaleString()} 个版本方块可用`);
+        return [];
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setDiagnostics([
+      const runtimeDiagnostics: Diagnostic[] = [
         {
           severity: "error",
           stage: "runtime",
           code: "SCRIPT_RUNTIME_ERROR",
           message,
         },
-      ]);
+      ];
+      setDiagnostics(runtimeDiagnostics);
       setNotice("源码运行失败；已保留上一次成功预览");
       setActiveTab("diagnostics");
+      return runtimeDiagnostics;
     } finally {
       setRunning(false);
     }
@@ -217,12 +226,42 @@ export function BuilderWorkbench() {
     error: chatError,
   } = useChat({
     transport: chatTransport,
-    onFinish: ({ message }) => {
+    onFinish: async ({ message }) => {
       const nextSource = committedSource(message);
-      if (!nextSource) return;
+      if (!nextSource) {
+        autoFixCountRef.current = 0; // 如果 AI 没有生成或提交源码，重置修复计数
+        return;
+      }
       setSource(nextSource);
       setActiveTab("preview");
-      if (pack && modelSettings.builder.autoRunAfterGeneration) void runWith(nextSource, pack);
+      if (pack && modelSettings.builder.autoRunAfterGeneration) {
+        const errors = await runWith(nextSource, pack);
+        if (errors && errors.length > 0) {
+          if (autoFixCountRef.current < 3) {
+            autoFixCountRef.current += 1;
+            const errorReport = errors
+              .map((err, i) => `${i + 1}. [${err.code}] ${err.message}${err.block ? ` 在坐标 x:${err.block.x}, y:${err.block.y}, z:${err.block.z}` : ""}`)
+              .join("\n");
+
+            const retryMessage = `刚才提交的 JavaScript 源码在沙箱运行或方块属性校验中遇到了以下阻断错误，请分析并修改源码予以解决。注意：请必须提交包含修复的完整 JavaScript 代码，且不要在对话中直接粘出大段代码。\n\n【阻断错误报告】\n${errorReport}`;
+
+            setNotice(`自动检测到阻断错误，正在发起第 ${autoFixCountRef.current}/3 次自动修正…`);
+
+            // 自动追问
+            setTimeout(() => {
+              void sendMessage({ text: retryMessage }, { body: { version, source: nextSource, settings: modelSettings } });
+            }, 1000);
+          } else {
+            setNotice(`自动修正已达 3 次上限，仍存在阻断错误。请手动修改或更换提示词。`);
+            autoFixCountRef.current = 0; // 达到最大重试后重置
+          }
+        } else {
+          // 运行成功且无阻断错误，重置计数
+          autoFixCountRef.current = 0;
+        }
+      } else {
+        autoFixCountRef.current = 0;
+      }
     },
   });
 
@@ -259,6 +298,7 @@ export function BuilderWorkbench() {
     const text = value.trim();
     if (!text || chatStatus === "streaming" || chatStatus === "submitted") return;
     setPrompt("");
+    autoFixCountRef.current = 0; // 用户手动输入，重置自动修复计数
     await sendMessage({ text }, { body: { version, source, settings: modelSettings } });
   };
 
@@ -394,6 +434,21 @@ export function BuilderWorkbench() {
                 <Message from={message.role} key={message.id} className="builder-message">
                   {message.role === "assistant" && <div className="assistant-avatar"><WandSparkles size={15} /></div>}
                   <MessageContent className={message.role === "user" ? "user-message-content" : "assistant-message-content"}>
+                    {/* 渲染模型推理过程/思考链 */}
+                    {message.parts.some(p => p.type === "reasoning") && (
+                      <Collapsible className="reasoning-collapsible mb-2 border border-[#d8d5cb] rounded-md bg-[#f6f5f0] overflow-hidden">
+                        <CollapsibleTrigger className="flex w-full items-center justify-between p-2 text-xs font-semibold text-[#6a716d] hover:bg-[#e8e5dc]/50 transition-colors">
+                          <span className="flex items-center gap-1.5"><ChevronRight size={12} className="transition-transform group-data-[state=open]:rotate-90" />查看 AI 思考过程</span>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent className="p-3 border-t border-[#d8d5cb] text-xs font-mono text-[#555] bg-white whitespace-pre-wrap leading-relaxed max-h-[220px] overflow-y-auto">
+                          {message.parts
+                            .filter(p => p.type === "reasoning")
+                            .map(p => (p as { text: string }).text)
+                            .join("")}
+                        </CollapsibleContent>
+                      </Collapsible>
+                    )}
+
                     {messageText(message) && <MessageResponse>{messageText(message)}</MessageResponse>}
                     {message.parts.map((part, index) => {
                       if (part.type !== "tool-commit_source") return null;

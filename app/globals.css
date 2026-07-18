@@ -455,6 +455,15 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+/* AI 思考链折叠框及动画样式 */
+.reasoning-collapsible[data-state="open"] span svg {
+  transform: rotate(90deg);
+}
+
+.reasoning-collapsible span svg {
+  transition: transform 0.2s ease;
+}
+
 .quick-prompts {
   padding: 0 16px 10px;
   display: flex;

@@ -93,6 +93,14 @@ function builderInstructions(version: string, source: string | undefined, settin
     "Example: a signal travelling east (+X) requires facing=west, so use redstone.repeater(\"east\", { delay: 2 }).",
     "The build callback API is ({ world, block, redstone }).",
   ].join(" ");
+  const blockNameSafetyRule = [
+    "CRITICAL BLOCK ID & NAMESPACE RULES:",
+    "1. Every block ID passed to block() or region methods (set, fill, hollowBox, walls, replace, etc.) MUST be prefix-complete with its namespace, e.g., use 'minecraft:stone' instead of 'stone', use 'minecraft:spruce_planks' instead of 'spruce_planks'. Never omit the 'minecraft:' prefix.",
+    "2. Ensure you use the correct block ID names for the target Minecraft Java version: " + version + ".",
+    "   - For 1.13+, use flattened IDs (e.g. 'minecraft:oak_sign' instead of 'minecraft:sign', 'minecraft:oak_planks' instead of 'minecraft:planks').",
+    "   - For 1.12.2 and older, use legacy IDs if required, or follow standard legacy names.",
+    "   - Double-check that block IDs generated actually exist in Java " + version + "."
+  ].join(" ");
   const extra = settings.builder.extraInstructions.trim()
     ? `\n用户的额外生成偏好：\n${settings.builder.extraInstructions.trim()}`
     : "";
@@ -103,9 +111,21 @@ function builderInstructions(version: string, source: string | undefined, settin
 ${stateRule}
 ${redstoneRule}
 ${redstoneSemantics}
+${blockNameSafetyRule}
 ${editRule}
 结构不得超过 ${settings.builder.maxBuildBlocks.toLocaleString("en-US")} 个方块。
-可用 API：mc.build(metadata, ({ world, block, redstone }) => { const region = world.region(name, {origin}); region.set/fill/hollowBox/walls/line/pillar/replace(...) })。
+可用 API：
+mc.build(metadata, ({ world, block, redstone }) => {
+  const region = world.region(name, {origin: [x,y,z]});
+  // API 签名说明：坐标/位置/范围参数（[x,y,z] 数组）必须作为前方的参数传入，方块状态参数（如 block(...) 或 ID 字符串）放在最后。
+  region.set([x, y, z], blockState)
+  region.fill([x1, y1, z1], [x2, y2, z2], blockState)
+  region.hollowBox([x1, y1, z1], [x2, y2, z2], blockState)
+  region.walls([x1, y1, z1], [x2, y2, z2], blockState)
+  region.line([x1, y1, z1], [x2, y2, z2], blockState)
+  region.pillar([x, y, z], height, blockState)
+  region.replace([x1, y1, z1], [x2, y2, z2], matchId, blockState)
+})。
 完成后必须调用 commit_source 提交完整 JavaScript；聊天正文只简要说明结果、精度假设和需要用户注意的限制，不粘贴源码。
 当前源码如下：
 ${source ?? "// empty project"}${extra}`;
@@ -140,6 +160,7 @@ export async function POST(request: Request) {
     timeout: { totalMs: settings.generation.timeoutMs },
     abortSignal: request.signal,
     seed: settings.generation.seed ?? undefined,
+    reasoning: "medium", // 开启 AI SDK 7.0 支持的折叠式思维链，会在 API Stream 中传递 reasoning part
     tools: {
       commit_source: {
         description: "提交可在受控 Building SDK 沙箱中运行的完整 JavaScript 源码",
