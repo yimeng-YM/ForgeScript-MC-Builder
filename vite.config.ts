@@ -33,7 +33,7 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ command }) => {
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -43,6 +43,10 @@ export default defineConfig(async () => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
+  // 在生产打包 (build) 时将 ssr 子环境设为空，以彻底减少服务端体积防止超出 Cloudflare Workers 免费版 3MB 限制。
+  // 在本地开发 (serve) 时保留 ssr 子环境，以使 Vite dev 环境的 Module runner 能够正常跑起。
+  const childEnvironments = command === "build" ? [] : ["ssr"];
+
   return {
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
@@ -51,7 +55,7 @@ export default defineConfig(async () => {
       vinext(),
       sites(),
       cloudflare({
-        viteEnvironment: { name: "rsc", childEnvironments: [] },
+        viteEnvironment: { name: "rsc", childEnvironments },
         config: localBindingConfig,
       }),
     ],
