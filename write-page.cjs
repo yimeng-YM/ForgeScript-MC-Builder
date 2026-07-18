@@ -1,4 +1,6 @@
-﻿"use client";
+﻿const fs = require("fs");
+const path = require("path");
+const content = `"use client";
 
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
@@ -32,7 +34,7 @@ const BuilderWorkbench = dynamic(
             }}
           />
           <div>正在加载 LLM MC Builder…</div>
-          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <style>{\`@keyframes spin { to { transform: rotate(360deg); } }\`}</style>
         </div>
       </div>
     ),
@@ -55,4 +57,7 @@ export default function Home() {
   }
 
   return <BuilderWorkbench />;
-}
+`;
+const target = path.join(__dirname, "app", "page.tsx");
+fs.writeFileSync(target, content, "utf8");
+console.log("written", fs.readFileSync(target, "utf8").length, "bytes");

@@ -39,7 +39,11 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { Tool, ToolContent, ToolHeader } from "@/components/ai-elements/tool";
-import { Viewport3D } from "./viewport-3d";
+import dynamic from "next/dynamic";
+const Viewport3D = dynamic(
+  () => import("./viewport-3d").then((mod) => mod.Viewport3D),
+  { ssr: false }
+);
 import { ModelSettingsDialog } from "./model-settings-dialog";
 import {
   DEFAULT_MODEL_SETTINGS,

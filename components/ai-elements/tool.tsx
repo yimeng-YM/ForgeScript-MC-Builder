@@ -18,8 +18,12 @@ import {
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { isValidElement } from "react";
+import dynamic from "next/dynamic";
 
-import { CodeBlock } from "./code-block";
+const CodeBlock = dynamic(
+  () => import("./code-block").then((mod) => mod.CodeBlock),
+  { ssr: false }
+);
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
