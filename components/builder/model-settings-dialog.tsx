@@ -33,6 +33,11 @@ import {
   type ModelProfile,
   type ModelSettings,
 } from "@/lib/ai/model-settings";
+import {
+  fetchClientModelCatalog,
+  testClientModelConnection,
+  type CatalogModel,
+} from "@/lib/ai/client-models";
 
 type SettingsTab = "provider" | "generation" | "builder";
 type TestState =
@@ -49,7 +54,6 @@ type Props = {
   onSave: (profiles: ModelProfile[], activeProfileId: string) => void;
 };
 
-type CatalogModel = { id: string; name: string; vision: boolean; provider?: string };
 type CatalogState =
   | { status: "idle"; models: CatalogModel[] }
   | { status: "loading"; models: CatalogModel[] }
@@ -251,19 +255,8 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
     setCatalogState((current) => ({ status: "loading", models: current.models }));
     try {
       const settings = validatedDraft();
-      const response = await fetch("/api/models", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settings }),
-      });
-      const result = await response.json() as {
-        ok?: boolean;
-        error?: string;
-        source?: string;
-        models?: CatalogModel[];
-      };
-      if (!response.ok || !result.ok || !result.models) throw new Error(result.error || "获取模型列表失败");
-      setCatalogState({ status: "success", models: result.models, source: result.source ?? "供应商" });
+      const result = await fetchClientModelCatalog(settings);
+      setCatalogState({ status: "success", models: result.models, source: result.source });
     } catch (error) {
       setCatalogState({
         status: "error",
@@ -278,22 +271,10 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
     setTestState({ status: "testing" });
     try {
       const settings = validatedDraft();
-      const response = await fetch("/api/models/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settings }),
-      });
-      const result = await response.json() as {
-        ok?: boolean;
-        error?: string;
-        label?: string;
-        latencyMs?: number;
-        message?: string;
-      };
-      if (!response.ok || !result.ok) throw new Error(result.error || "连接测试失败");
+      const result = await testClientModelConnection(settings);
       setTestState({
         status: "success",
-        message: `${result.label ?? settings.model} · ${result.latencyMs ?? 0} ms · ${result.message ?? "连接成功"}`,
+        message: `${result.label} · ${result.latencyMs} ms · ${result.message}`,
       });
     } catch (error) {
       setTestState({ status: "error", message: error instanceof Error ? error.message : String(error) });
@@ -321,7 +302,7 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
             <div>
               <Dialog.Title>模型与生成设置</Dialog.Title>
               <Dialog.Description id="model-settings-description">
-                选择供应商、调整采样参数，并定义 Minecraft 结构生成精度。
+                浏览器直接连接模型供应商；Cloudflare 不再中转 AI 请求。
               </Dialog.Description>
             </div>
             <Dialog.Close className="settings-close" aria-label="关闭模型设置"><X size={17} /></Dialog.Close>
@@ -340,7 +321,7 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
               </button>
               <div className="settings-security-note">
                 <ShieldCheck size={16} />
-                <span><strong>BYOK 安全模式</strong><small>密钥不写入项目源码或长期浏览器存储。</small></span>
+                <span><strong>浏览器直连 BYOK</strong><small>密钥仅发送给所选供应商，不经过 ForgeScript Worker。</small></span>
               </div>
             </nav>
 
@@ -386,7 +367,7 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
                   </Field>
 
                   {preset.localOnly && (
-                    <div className="settings-callout warning"><CircleAlert size={15} /><span>本机模型只在本地运行 ForgeScript 时可连接；已部署网页无法访问你电脑的 localhost。</span></div>
+                    <div className="settings-callout warning"><CircleAlert size={15} /><span>部署后的网页会从浏览器尝试访问 localhost；本机服务必须允许当前网页 Origin，且浏览器不能拦截 CORS、私有网络访问或混合内容。</span></div>
                   )}
 
                   <div className="settings-grid two">
@@ -431,7 +412,7 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
                     </Field>
                   )}
 
-                  <Field label="API Key" hint="留空时会尝试使用服务器环境变量；自动模式留空可回退到本地演示。">
+                  <Field label="API Key" hint="远程模型必须填写；不会读取服务器环境变量。自动模式留空时使用浏览器本地演示。">
                     <div className="secret-input">
                       <KeyRound size={14} />
                       <input type={showSecret ? "text" : "password"} value={draft.apiKey} onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))} autoComplete="off" placeholder="sk-…" />
@@ -488,8 +469,8 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
                         <input type="number" min="0" max="1" step="0.05" disabled={draft.generation.topP === null} value={draft.generation.topP ?? 0.9} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, topP: Number(event.target.value) } }))} />
                       </div>
                     </Field>
-                    <Field label="最大输出 Token" hint="大型建筑脚本需要更高上限">
-                      <input type="number" min="256" max="64000" step="256" value={draft.generation.maxOutputTokens} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxOutputTokens: Number(event.target.value) } }))} />
+                    <Field label="最大输出 Token" hint="不设上限，实际可用值以供应商为准；大型建筑脚本需要更高值，思维链共享此预算">
+                      <input type="number" min="256" step="256" value={draft.generation.maxOutputTokens} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxOutputTokens: Number(event.target.value) } }))} />
                     </Field>
                     <Field label="Agent 最大步数" hint="每次沙箱拒绝后模型会读取错误并继续修正，范围 2–12">
                       <input type="number" min="2" max="12" value={draft.generation.maxSteps} onChange={(event) => setDraft((current) => ({ ...current, generation: { ...current.generation, maxSteps: Number(event.target.value) } }))} />
@@ -553,7 +534,7 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
 
           <footer className="settings-footer">
             <div className={`connection-result ${testState.status}`} aria-live="polite">
-              {testState.status === "testing" && <><LoaderCircle size={14} className="spin" /> 正在执行真实模型连接测试…</>}
+              {testState.status === "testing" && <><LoaderCircle size={14} className="spin" /> 正在从浏览器执行真实模型连接测试…</>}
               {testState.status === "success" && <><Check size={14} /> {testState.message}</>}
               {testState.status === "error" && <><CircleAlert size={14} /> {testState.message}</>}
               {testState.status === "idle" && formError && <><CircleAlert size={14} /> {formError}</>}

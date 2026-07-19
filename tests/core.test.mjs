@@ -14,7 +14,10 @@ import {
   saveModelProfiles,
 } from "../lib/ai/model-settings.ts";
 import { latestCommitOutput } from "../lib/ai/agent-protocol.ts";
-import { requiredToolChoice, shouldUseStrictToolSchema } from "../lib/ai/provider.ts";
+import {
+  requiredClientToolChoice as requiredToolChoice,
+  shouldUseClientStrictToolSchema as shouldUseStrictToolSchema,
+} from "../lib/ai/client-provider.ts";
 import { preflightBuilderSource } from "../lib/ai/source-preflight.ts";
 import { DEFAULT_SOURCE, emptySource, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
@@ -39,7 +42,7 @@ test("ships validated model provider presets and safe generation defaults", () =
   }
   assert.equal(DEFAULT_MODEL_SETTINGS.builder.redstonePrecision, true);
   assert.equal(DEFAULT_MODEL_SETTINGS.builder.strictBlockStates, true);
-  assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxOutputTokens, 16_000);
+  assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxOutputTokens, 32_768);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, 30 * 60 * 1_000);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.timeoutMs, DEFAULT_GENERATION_TIMEOUT_MS);
   assert.equal(DEFAULT_MODEL_SETTINGS.generation.maxSteps, 6);

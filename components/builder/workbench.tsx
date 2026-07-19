@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import type { ChatAddToolOutputFunction, FileUIPart } from "ai";
 import {
   Box,
@@ -71,6 +71,7 @@ import {
   type CommitSourceOutput,
 } from "@/lib/ai/agent-protocol";
 import { clearAgentSession } from "@/lib/ai/agent-persistence";
+import { clientBuilderTransport } from "@/lib/ai/client-chat";
 import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { DEFAULT_SOURCE, emptySource } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
@@ -233,8 +234,6 @@ export function BuilderWorkbench() {
   );
   const blockingErrors = diagnostics.filter((item) => item.severity === "error").length;
   const warnings = diagnostics.filter((item) => item.severity === "warning").length;
-  const chatTransport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
-
   const evaluateSource = useCallback(async (nextSource: string, nextPack: VersionPack) => {
     try {
       const nextWorld = await executeBuilderSource(nextSource, {
@@ -355,7 +354,7 @@ export function BuilderWorkbench() {
     status: chatStatus,
     error: chatError,
   } = useChat<BuilderUIMessage>({
-    transport: chatTransport,
+    transport: clientBuilderTransport,
     sendAutomaticallyWhen: ({ messages: nextMessages }) => (
       activeRunRef.current !== null
       && lastAssistantMessageIsCompleteWithToolCalls({ messages: nextMessages })
@@ -500,10 +499,11 @@ export function BuilderWorkbench() {
         if (activeRunRef.current?.id === activeRun.id) setRunning(false);
       }
     },
-    onFinish: ({ message, messages: nextMessages, isAbort, isError }) => {
+    onFinish: ({ message, messages: nextMessages, isAbort, isError, finishReason }) => {
       if (isAbort) return;
       const activeRun = activeRunRef.current;
       if (!activeRun) return;
+      const truncationHint = `模型输出达到 ${modelSettings.generation.maxOutputTokens.toLocaleString()} Token 上限被截断；请在模型设置中提高最大输出 Token，或降低推理强度（思维链与正文共享输出预算）`;
       const lastStepStartIndex = message.parts.reduce(
         (lastIndex, part, index) => part.type === "step-start" ? index : lastIndex,
         -1,
@@ -514,6 +514,13 @@ export function BuilderWorkbench() {
       const invalidToolPart = toolParts.find((part) => part.state === "output-error");
       if (invalidToolPart) {
         const attempt = activeRun.attempt + 1;
+        // 长度截断产生的无效工具参数不会随重试自愈，直接终止并给出可行动的指引。
+        if (finishReason === "length") {
+          activeRunRef.current = null;
+          setAgentRun({ ...activeRun, status: "failed", attempt, error: "commit_source 参数被输出上限截断" });
+          setNotice(truncationHint);
+          return;
+        }
         const exhausted = attempt >= activeRun.maxAttempts;
         if (exhausted) activeRunRef.current = null;
         else activeRunRef.current = { ...activeRun, attempt };
@@ -531,8 +538,11 @@ export function BuilderWorkbench() {
       if (toolParts.length > 0) return;
       const terminal = latestCommitOutput(nextMessages);
       if (isError || !terminal) {
-        setAgentRun({ ...activeRun, status: "failed", error: "模型未提交可验证的完整源码" });
-        setNotice("Agent 已停止：模型未提交可验证的完整源码");
+        const error = finishReason === "length"
+          ? "输出被 Token 上限截断，模型未能提交完整源码"
+          : "模型未提交可验证的完整源码";
+        setAgentRun({ ...activeRun, status: "failed", error });
+        setNotice(finishReason === "length" ? truncationHint : `Agent 已停止：${error}`);
       } else if (terminal.accepted) {
         setAgentRun({ ...activeRun, status: "succeeded", attempt: activeRun.attempt });
       } else if (terminal.exhausted) {
@@ -546,7 +556,7 @@ export function BuilderWorkbench() {
       const activeRun = activeRunRef.current;
       if (!activeRun) return;
       setAgentRun({ ...activeRun, status: "failed", error: error.message });
-      setNotice(`Agent 请求失败：${error.message}`);
+      setNotice(`Agent 响应中断：${error.message}`);
       activeRunRef.current = null;
     },
   });

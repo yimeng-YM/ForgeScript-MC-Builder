@@ -10,7 +10,7 @@
     "build": "node scripts/build-cloudflare.mjs && (node scripts/fix-ssr-externals-v2.mjs || node scripts/fix-ssr-externals.cjs || true)",
     "start": "vinext start",
     "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .wrangler --ignore-pattern write-page.js --ignore-pattern write-page.cjs",
     "profiles:generate": "node scripts/generate-version-packs.mjs"
   },
   "dependencies": {

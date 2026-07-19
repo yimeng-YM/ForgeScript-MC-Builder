@@ -40,6 +40,7 @@ test("pre-renders the home page so Cloudflare serves it without invoking the Wor
   assert.match(html, /ForgeScript/);
   assert.equal(workerConfig.assets.directory, "../client");
   assert.equal(workerConfig.assets.run_worker_first, undefined);
+  assert.equal(workerConfig.limits, undefined);
   assert.doesNotMatch(layoutSource, /next\/headers|generateMetadata|headers\(\)/);
 });
 
@@ -54,50 +55,20 @@ test("the 3D viewport owns and releases one WebGL renderer", async () => {
   assert.doesNotMatch(source, /PCFSoftShadowMap/);
 });
 
-test("tests the default model connection without exposing a secret", async () => {
-  const response = await fetchWorker("/api/models/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  assert.equal(response.status, 200);
-  const result = await response.json();
-  assert.equal(result.ok, true);
-  assert.equal(result.mode, "local");
-  assert.doesNotMatch(JSON.stringify(result), /apiKey|AI_GATEWAY_API_KEY/);
-});
+test("keeps every AI operation in the browser client", async () => {
+  const workbench = await readFile(new URL("../components/builder/workbench.tsx", import.meta.url), "utf8");
+  const dialog = await readFile(new URL("../components/builder/model-settings-dialog.tsx", import.meta.url), "utf8");
+  const transport = await readFile(new URL("../lib/ai/client-chat.ts", import.meta.url), "utf8");
+  const modelClient = await readFile(new URL("../lib/ai/client-models.ts", import.meta.url), "utf8");
 
-test("rejects malformed model catalog requests before contacting a provider", async () => {
-  const response = await fetchWorker("/api/models", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings: {} }),
-  });
-  assert.equal(response.status, 400);
-  const result = await response.json();
-  assert.match(result.error, /模型配置无效/);
-});
-
-test("rejects malformed chat message histories with a 400 response", async () => {
-  const response = await fetchWorker("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: [null] }),
-  });
-  assert.equal(response.status, 400);
-  const result = await response.json();
-  assert.match(result.error, /Invalid UI message history/);
-});
-
-test("rejects invalid chat JSON without raising a server error", async () => {
-  const response = await fetchWorker("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{",
-  });
-  assert.equal(response.status, 400);
-  const result = await response.json();
-  assert.match(result.error, /Invalid JSON/);
+  assert.doesNotMatch(workbench, /DefaultChatTransport|\/api\/chat/);
+  assert.doesNotMatch(dialog, /\/api\/models/);
+  assert.match(transport, /implements ChatTransport/);
+  assert.match(transport, /createAgentUIStream/);
+  assert.match(modelClient, /fetchClientModelCatalog/);
+  await assert.rejects(readFile(new URL("../app/api/chat/route.ts", import.meta.url), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(new URL("../app/api/models/route.ts", import.meta.url), "utf8"), /ENOENT/);
+  await assert.rejects(readFile(new URL("../app/api/models/test/route.ts", import.meta.url), "utf8"), /ENOENT/);
 });
 
 test("ships generated multi-version profile packs", async () => {

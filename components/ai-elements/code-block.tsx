@@ -22,11 +22,10 @@ import {
   useState,
 } from "react";
 import type {
-  BundledTheme,
-  HighlighterGeneric,
   ThemedToken,
 } from "shiki";
 import { createHighlighterCore } from "shiki/core";
+import { createOnigurumaEngine } from "shiki/engine/oniguruma";
 import createWasm from "shiki/wasm";
 import jsLang from "shiki/langs/javascript.mjs";
 import jsonLang from "shiki/langs/json.mjs";
@@ -134,10 +133,8 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
 });
 
 // Highlighter cache (singleton per language)
-const highlighterCache = new Map<
-  string,
-  Promise<any>
->();
+type CodeHighlighter = Awaited<ReturnType<typeof createHighlighterCore>>;
+const highlighterCache = new Map<string, Promise<CodeHighlighter>>();
 
 // Token cache
 const tokensCache = new Map<string, TokenizedCode>();
@@ -153,7 +150,7 @@ const getTokensCacheKey = (code: string, language: string) => {
 
 const getHighlighter = (
   language: string
-): Promise<any> => {
+): Promise<CodeHighlighter> => {
   const cached = highlighterCache.get(language);
   if (cached) {
     return cached;
@@ -162,7 +159,7 @@ const getHighlighter = (
   const highlighterPromise = createHighlighterCore({
     langs: [jsLang, jsonLang],
     themes: [githubLight, githubDark],
-    loadWasm: createWasm,
+    engine: createOnigurumaEngine(createWasm),
   });
 
   highlighterCache.set(language, highlighterPromise);
