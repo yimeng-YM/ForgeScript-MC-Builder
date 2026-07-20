@@ -137,9 +137,53 @@ function builderInstructions(version: string, source: string | undefined, settin
 只生成受控 Building SDK JavaScript，不得使用 fetch、DOM、文件、模块导入或计时器。坐标约定：X 东、Y 上、Z 南。
 ${detailInstruction(settings)} ${stateRule} ${redstoneRule} ${editRule}
 结构不得超过 ${settings.builder.maxBuildBlocks.toLocaleString("en-US")} 个方块。
-每个传入 block()、set、fill、hollowBox、walls、replace 等 API 的方块 ID 都必须包含命名空间，例如 minecraft:stone，并确保 ID 存在于 Java ${version}。
-构建入口：mc.build(metadata, ({ world, block, redstone }) => { /* 使用 world.region 与 region API */ })。
-Java 红石语义：中继器和比较器的 block-state facing 从输出指向输入，与信号传播方向相反；优先使用 redstone.repeater(signalDirection, options) 和 redstone.comparator(signalDirection, options)。
+
+## 关键 API 用法（必须严格遵守）
+
+### 坐标格式
+所有坐标必须是 [x, y, z] 整数数组，不能是对象或其他格式。例如：
+- 正确: [0, 0, 0], [5, 3, -2]
+- 错误: {x: 0, y: 0, z: 0}, "0,0,0"
+
+### 区域创建
+const region = world.region("名称", { origin: [0, 0, 0] });
+
+### 放置方块
+region.set([x, y, z], block("minecraft:stone"))
+
+### 填充区域（两个角点必须都是 [x,y,z] 数组）
+region.fill([x1, y1, z1], [x2, y2, z2], block("minecraft:stone"))
+
+### 空心盒子
+region.hollowBox([x1, y1, z1], [x2, y2, z2], block("minecraft:stone"))
+
+### 墙壁（只有四面墙，不含顶底）
+region.walls([x1, y1, z1], [x2, y2, z2], block("minecraft:stone"))
+
+### 直线
+region.line([x1, y1, z1], [x2, y2, z2], block("minecraft:stone"))
+
+### 柱子
+region.pillar([x, y, z], height, block("minecraft:stone"))
+
+### 方块 ID 规则
+每个传入 block() 的方块 ID 都必须包含命名空间，例如 minecraft:stone，并确保 ID 存在于 Java ${version}。
+
+### 构建入口
+mc.build({ name: "名称", version: "${version}", author: "作者", description: "描述" }, ({ world, block, redstone }) => {
+  // 使用 world.region 与 region API
+});
+
+### Java 红石语义
+中继器和比较器的 block-state facing 从输出指向输入，与信号传播方向相反；优先使用 redstone.repeater(signalDirection, options) 和 redstone.comparator(signalDirection, options)。
+
+## 常见错误避免
+1. fill/hollowBox/walls/line 的 from 和 to 参数必须是 [x, y, z] 数组，不能传其他格式
+2. region.set 的第一个参数必须是 [x, y, z] 数组
+3. block() 的第一个参数必须是带命名空间的字符串，如 "minecraft:stone"
+4. 所有坐标值必须是整数，不能是浮点数
+5. 不要调用不存在的方法，只使用上述列出的 API
+
 完成后必须调用 commit_source 提交完整 JavaScript。工具在当前浏览器内执行 AST 安全预检、QuickJS 隔离执行和目标版本注册表校验。
 若 accepted=false 且 terminal 不为 true，必须读取准确错误、修复完整源码并再次提交；accepted=true 后停止调用工具并简要总结；terminal=true 后不得继续调用工具。
 不要输出私有思维链，只提供简洁、可核验的摘要和工具轨迹。

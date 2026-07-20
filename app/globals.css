@@ -905,6 +905,43 @@ textarea:focus-visible {
   background: #151c19;
 }
 
+.attempted-source-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #2d1f1f;
+  border-bottom: 1px solid #5a3a3a;
+  color: #f0c0c0;
+  font-size: 11px;
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.attempted-source-banner svg {
+  flex-shrink: 0;
+  color: #e57373;
+}
+
+.attempted-source-banner span {
+  flex: 1;
+}
+
+.attempted-source-banner button {
+  padding: 3px 8px;
+  border: 1px solid #5a3a3a;
+  border-radius: 4px;
+  background: #3a2525;
+  color: #f0c0c0;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.attempted-source-banner button:hover {
+  background: #4a3030;
+  border-color: #7a5050;
+}
+
 .source-meta {
   height: 37px;
   padding: 0 12px;

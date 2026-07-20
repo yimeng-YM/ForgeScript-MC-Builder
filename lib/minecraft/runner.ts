@@ -1,5 +1,5 @@
 import type { WorldDocument } from "./types";
-import { resolveRedstoneConnections } from "./redstone.ts";
+import { resolveRedstoneConnections, resolveConnectingBlocks } from "./redstone.ts";
 
 const SDK_BOOTSTRAP = String.raw`
 (() => {
@@ -236,13 +236,13 @@ export async function executeBuilderSource(
     result.value.dispose();
     if (typeof serialized !== "string") throw new Error("Building SDK did not return serialized world data");
     const parsed = JSON.parse(serialized) as WorldDocument;
-    return resolveRedstoneConnections({
+    return resolveConnectingBlocks(resolveRedstoneConnections({
       name: parsed.name || "Untitled build",
       version: parsed.version || "1.21.11",
       author: parsed.author || "LLM MC Builder",
       description: parsed.description || "",
       blocks: parsed.blocks ?? [],
-    });
+    }));
   } finally {
     context.dispose();
     runtime.dispose();

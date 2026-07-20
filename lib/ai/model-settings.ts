@@ -309,7 +309,7 @@ export function loadModelSettings(): ModelSettings {
   try {
     const saved = window.localStorage.getItem(PREFERENCES_KEY);
     const parsed = saved ? JSON.parse(saved) : {};
-    const secret = window.sessionStorage.getItem(SECRET_KEY) ?? "";
+    const secret = window.localStorage.getItem(SECRET_KEY) ?? "";
     const generation = { ...DEFAULT_MODEL_SETTINGS.generation, ...parsed.generation };
     if (generation.timeoutMs === LEGACY_DEFAULT_GENERATION_TIMEOUT_MS) {
       generation.timeoutMs = DEFAULT_GENERATION_TIMEOUT_MS;
@@ -333,9 +333,9 @@ export function saveModelSettings(settings: ModelSettings) {
   const preferences = { ...settings, apiKey: "" };
   window.localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
   if (settings.rememberApiKey && settings.apiKey) {
-    window.sessionStorage.setItem(SECRET_KEY, settings.apiKey);
+    window.localStorage.setItem(SECRET_KEY, settings.apiKey);
   } else {
-    window.sessionStorage.removeItem(SECRET_KEY);
+    window.localStorage.removeItem(SECRET_KEY);
   }
 }
 
@@ -368,7 +368,7 @@ export function loadModelProfiles(): { profiles: ModelProfile[]; activeProfileId
       if (!entry || typeof entry !== "object") return [];
       const raw = entry as Partial<ModelProfile>;
       if (typeof raw.id !== "string" || typeof raw.name !== "string") return [];
-      const apiKey = window.sessionStorage.getItem(`${PROFILE_SECRET_PREFIX}${raw.id}`) ?? "";
+      const apiKey = window.localStorage.getItem(`${PROFILE_SECRET_PREFIX}${raw.id}`) ?? "";
       const settings = profileSettings(raw.settings, apiKey);
       if (!settings) return [];
       return [{
@@ -409,7 +409,7 @@ export function saveModelProfiles(profiles: ModelProfile[], activeProfileId: str
         const retainedIds = new Set(profiles.map((profile) => profile.id));
         for (const entry of previous) {
           if (entry && typeof entry === "object" && "id" in entry && typeof entry.id === "string" && !retainedIds.has(entry.id)) {
-            window.sessionStorage.removeItem(`${PROFILE_SECRET_PREFIX}${entry.id}`);
+            window.localStorage.removeItem(`${PROFILE_SECRET_PREFIX}${entry.id}`);
           }
         }
       }
@@ -433,9 +433,9 @@ export function saveModelProfiles(profiles: ModelProfile[], activeProfileId: str
     for (const profile of profiles) {
       const key = `${PROFILE_SECRET_PREFIX}${profile.id}`;
       if (profile.settings.rememberApiKey && profile.settings.apiKey) {
-        window.sessionStorage.setItem(key, profile.settings.apiKey);
+        window.localStorage.setItem(key, profile.settings.apiKey);
       } else {
-        window.sessionStorage.removeItem(key);
+        window.localStorage.removeItem(key);
       }
     }
 

@@ -163,6 +163,36 @@ function fileToUIPart(file: File): Promise<FileUIPart> {
   });
 }
 
+
+// Block name translations loaded from external file
+let blockNamesZh: Record<string, string> | null = null;
+
+async function loadBlockNames(): Promise<Record<string, string>> {
+  if (blockNamesZh) return blockNamesZh;
+  try {
+    const response = await fetch('/block-names-zh.json');
+    if (response.ok) {
+      blockNamesZh = await response.json();
+    }
+  } catch (e) {
+    // Fallback to empty
+  }
+  return blockNamesZh || {};
+}
+
+function getBlockDisplayName(pack: VersionPack | null, blockId: string): string {
+  const shortId = blockId.replace("minecraft:", "");
+  // Try to get from loaded translations
+  if (blockNamesZh && blockNamesZh[blockId]) {
+    return blockNamesZh[blockId];
+  }
+  // Fallback to version pack displayName or short ID
+  return pack?.blocks.find((b) => b.id === blockId)?.displayName || shortId;
+}
+
+// Load translations on module init
+loadBlockNames();
+
 function formatBytes(bytes: number) {
   if (!bytes) return "待发布";
   return `${Math.round(bytes / 1024)} KB`;
@@ -218,6 +248,7 @@ export function BuilderWorkbench() {
     attempt: 0,
     maxAttempts: 1,
   });
+  const [attemptedSource, setAttemptedSource] = useState<string | null>(null);
   const executionTimeoutRef = useRef(DEFAULT_MODEL_SETTINGS.builder.executionTimeoutMs);
   const maxBuildBlocksRef = useRef(DEFAULT_MODEL_SETTINGS.builder.maxBuildBlocks);
   const activeRunRef = useRef<{ id: string; attempt: number; maxAttempts: number } | null>(null);
@@ -450,16 +481,18 @@ export function BuilderWorkbench() {
               ? ` @ ${diagnostic.block.x},${diagnostic.block.y},${diagnostic.block.z}`
               : ""}`
           )).join("\n");
+          setAttemptedSource(nextSource);
           returnFailure({
             stage: evaluation.errors.some((item) => item.stage === "runtime") ? "runtime" : "registry",
             error: errorReport.slice(0, 20_000),
           });
-          setActiveTab("diagnostics");
+          setActiveTab("source");
           return;
         }
 
         const nextStats = getWorldStats(evaluation.world);
         setSource(nextSource);
+        setAttemptedSource(null);
         setSelected(null);
         if (modelSettings.builder.autoRunAfterGeneration) {
           setWorld(evaluation.world);
@@ -490,10 +523,19 @@ export function BuilderWorkbench() {
           options: { body: { version: claimedVersion, source: nextSource, settings: modelSettings } },
         });
       } catch (error) {
-        if (activeRunRef.current?.id !== activeRun.id) return;
+        setAttemptedSource(nextSource);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        let helpfulHint = "";
+        if (errorMsg.includes("from must be") || errorMsg.includes("to must be")) {
+          helpfulHint = "\n\n提示：fill/hollowBox/walls/line 的 from 和 to 参数必须是 [x, y, z] 整数数组格式，例如 [0, 0, 0]。";
+        } else if (errorMsg.includes("not a function")) {
+          helpfulHint = "\n\n提示：请检查是否调用了不存在的方法。只使用 world.region、region.set、region.fill、region.hollowBox、region.walls、region.line、region.pillar、region.replace、block() 等已定义的 API。";
+        } else if (errorMsg.includes("must be an integer")) {
+          helpfulHint = "\n\n提示：所有坐标值和尺寸必须是整数，不能是浮点数。";
+        }
         returnFailure({
           stage: "runtime",
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMsg + helpfulHint,
         });
       } finally {
         if (activeRunRef.current?.id === activeRun.id) setRunning(false);
@@ -727,6 +769,7 @@ export function BuilderWorkbench() {
     setRedstoneOnly(false);
     setLayer(null);
     setAgentRun({ id: null, status: "idle", attempt: 0, maxAttempts: 1 });
+    setAttemptedSource(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
     void clearAgentSession().catch(() => undefined);
     setNotice("已新建空白绘画 · 对话、源码、校验与预览已清空");
@@ -1127,10 +1170,18 @@ export function BuilderWorkbench() {
 
             {activeTab === "source" && (
               <div className="source-surface">
+                {attemptedSource && agentRun.status === "failed" && (
+                  <div className="attempted-source-banner">
+                    <CircleAlert size={14} />
+                    <span>下方显示的是 AI 生成但未通过校验的源码（共 {lineCount(attemptedSource)} 行）。你可以查看、修改后手动运行。</span>
+                    <button onClick={() => { setSource(attemptedSource); setAttemptedSource(null); }}>{"采用此源码"}</button>
+                    <button onClick={() => setAttemptedSource(null)}>{"恢复上一版本"}</button>
+                  </div>
+                )}
                 <div className="source-meta"><span><Braces size={13} /> build.js</span><span>{lineCount(source)} lines · QuickJS sandbox</span></div>
                 <div className="editor-wrap">
-                  <div className="line-numbers" aria-hidden="true">{Array.from({ length: lineCount(source) }, (_, index) => <span key={index}>{index + 1}</span>)}</div>
-                  <textarea value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} aria-label="建筑 JavaScript 源码" />
+                  <div className="line-numbers" aria-hidden="true">{Array.from({ length: lineCount(attemptedSource && agentRun.status === "failed" ? attemptedSource : source) }, (_, index) => <span key={index}>{index + 1}</span>)}</div>
+                  <textarea value={attemptedSource && agentRun.status === "failed" ? attemptedSource : source} onChange={(event) => { if (attemptedSource && agentRun.status === "failed") { setAttemptedSource(event.target.value); } else { setSource(event.target.value); } }} spellCheck={false} aria-label="建筑 JavaScript 源码" />
                 </div>
               </div>
             )}
@@ -1170,7 +1221,7 @@ export function BuilderWorkbench() {
             {selected ? (
               <div className="inspector-section selected-block">
                 <div className="block-swatch" style={{ background: /redstone/.test(selected.state.id) ? "#b84d44" : "#69736d" }}><Cuboid /></div>
-                <strong>{selected.state.id.replace("minecraft:", "")}</strong>
+                <strong>{getBlockDisplayName(pack, selected.state.id)}</strong>
                 <span>{selected.x}, {selected.y}, {selected.z}</span>
                 <dl>
                   {Object.entries(selected.state.properties).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}
@@ -1189,7 +1240,7 @@ export function BuilderWorkbench() {
                   <div className="section-title"><span>材料表</span><small>TOP {Math.min(8, stats.materials.length)}</small></div>
                   <div className="materials-list">
                     {stats.materials.slice(0, 8).map((material) => (
-                      <div key={material.id}><span className="material-dot" /><span title={material.id}>{material.id.replace("minecraft:", "")}</span><strong>{material.count.toLocaleString()}</strong></div>
+                      <div key={material.id}><span className="material-dot" /><span title={material.id}>{getBlockDisplayName(pack, material.id)}</span><strong>{material.count.toLocaleString()}</strong></div>
                     ))}
                   </div>
                 </div>

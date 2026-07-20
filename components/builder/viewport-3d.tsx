@@ -260,7 +260,7 @@ export function Viewport3D({
 
     const size = bounds.isEmpty() ? new THREE.Vector3(12, 8, 12) : bounds.getSize(new THREE.Vector3());
     const center = bounds.isEmpty() ? new THREE.Vector3(0, 2, 0) : bounds.getCenter(new THREE.Vector3());
-    const gridSize = Math.max(24, Math.ceil(Math.max(size.x, size.z) + 12));
+    const gridSize = Math.max(48, Math.ceil(Math.max(size.x, size.z) * 2 + 24));
     const grid = new THREE.GridHelper(gridSize, Math.min(gridSize, 64), 0x8f958e, 0xc8c8bd);
     grid.position.y = bounds.isEmpty() ? -0.5 : bounds.min.y - 0.5;
     runtime.content.add(grid);
