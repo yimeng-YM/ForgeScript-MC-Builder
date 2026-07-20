@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
@@ -1164,7 +1164,7 @@ export function BuilderWorkbench() {
                     <input type="range" min={Math.min(0, ...world.blocks.map((block) => block.y))} max={maxY} value={layer} onChange={(event) => setLayer(Number(event.target.value))} />
                   </div>
                 )}
-                {world.blocks.length > 12_000 && <div className="preview-overlay bottom-left">大型结构预览已抽样；导出仍保留全部方块</div>}
+                {world.blocks.length > 500_000 && <div className="preview-overlay bottom-left">大型结构预览已抽样；导出仍保留全部方块</div>}
               </div>
             )}
 

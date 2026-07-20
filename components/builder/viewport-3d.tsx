@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
@@ -80,8 +80,8 @@ export function Viewport3D({
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xe8e5dc);
-    scene.fog = new THREE.Fog(0xe8e5dc, 70, 170);
-    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 500);
+    scene.fog = new THREE.Fog(0xe8e5dc, 300, 800);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
@@ -92,7 +92,7 @@ export function Viewport3D({
     controls.enableDamping = true;
     controls.dampingFactor = 0.07;
     controls.screenSpacePanning = true;
-    controls.maxDistance = 240;
+    controls.maxDistance = 1000;
     controls.minDistance = 3;
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x6d716d, 2.2));
@@ -238,8 +238,8 @@ export function Viewport3D({
     const visible = world.blocks
       .filter((block) => (layer === null ? true : block.y <= layer))
       .filter((block) => (redstoneOnly ? /redstone|repeater|comparator|observer|piston|lever|button|lamp/.test(block.state.id) : true));
-    const sampled = visible.length > 12_000
-      ? visible.filter((_, index) => index % Math.ceil(visible.length / 12_000) === 0)
+    const sampled = visible.length > 500_000
+      ? visible.filter((_, index) => index % Math.ceil(visible.length / 500_000) === 0)
       : visible;
     const bounds = new THREE.Box3();
     for (const block of sampled) bounds.expandByPoint(new THREE.Vector3(block.x, block.y, block.z));

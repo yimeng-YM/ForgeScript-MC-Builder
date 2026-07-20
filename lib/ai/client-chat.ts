@@ -12,6 +12,12 @@ import { z } from "zod";
 import {
   commitSourceInputSchema,
   commitSourceOutputSchema,
+  readSourceInputSchema,
+  readSourceOutputSchema,
+  searchSourceInputSchema,
+  searchSourceOutputSchema,
+  editSourceInputSchema,
+  editSourceOutputSchema,
   latestCommitOutput,
   type BuilderUIMessage,
 } from "./agent-protocol.ts";
@@ -37,6 +43,107 @@ function createCommitSourceTool(settings: ModelSettings) {
     inputSchema: commitSourceInputSchema,
     outputSchema: commitSourceOutputSchema,
     ...(shouldUseClientStrictToolSchema(settings) ? { strict: true } : {}),
+  });
+}
+
+
+function createReadSourceTool(getSource: () => string, settings: ModelSettings) {
+  return tool({
+    description: "读取当前源码内容。可指定行号范围读取部分内容，默认读取全部源码。用于查看现有代码结构。",
+    inputSchema: readSourceInputSchema,
+    outputSchema: readSourceOutputSchema,
+    ...(shouldUseClientStrictToolSchema(settings) ? { strict: true } : {}),
+    execute: async (input) => {
+      const source = getSource();
+      const lines = source.split("\n");
+      const totalLines = lines.length;
+      const lineStart = Math.max(1, Math.min(input.lineStart ?? 1, totalLines));
+      const lineEnd = Math.max(lineStart, Math.min(input.lineEnd ?? totalLines, totalLines));
+      const selectedLines = lines.slice(lineStart - 1, lineEnd);
+      return {
+        source: selectedLines.join("\n"),
+        totalLines,
+        returnedLines: selectedLines.length,
+        lineStart,
+        lineEnd,
+      };
+    },
+  });
+}
+
+function createSearchSourceTool(getSource: () => string, settings: ModelSettings) {
+  return tool({
+    description: "在当前源码中搜索关键词或正则表达式。返回匹配行号、内容和上下文。用于快速定位代码片段。",
+    inputSchema: searchSourceInputSchema,
+    outputSchema: searchSourceOutputSchema,
+    ...(shouldUseClientStrictToolSchema(settings) ? { strict: true } : {}),
+    execute: async (input) => {
+      const source = getSource();
+      const lines = source.split("\n");
+      const matches: Array<{ lineNumber: number; line: string; context?: string[] }> = [];
+      let regex: RegExp;
+      try {
+        regex = input.isRegex
+          ? new RegExp(input.query, "g")
+          : new RegExp(input.query.replace(/[.*+?^${}()|[\]\\]/g, "\\function latestPrompt(messages: UIMessage[]) {"), "g");
+      } catch {
+        return { matches: [], totalMatches: 0, query: input.query };
+      }
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i])) {
+          const ctx: string[] = [];
+          const cl = input.contextLines ?? 2;
+          for (let j = Math.max(0, i - cl); j < i; j++) ctx.push(`${j + 1}: ${lines[j]}`);
+          for (let j = i + 1; j <= Math.min(lines.length - 1, i + cl); j++) ctx.push(`${j + 1}: ${lines[j]}`);
+          matches.push({ lineNumber: i + 1, line: lines[i], context: ctx.length > 0 ? ctx : undefined });
+          regex.lastIndex = 0;
+        }
+      }
+      return { matches, totalMatches: matches.length, query: input.query };
+    },
+  });
+}
+
+function createEditSourceTool(getSource: () => string, setSource: (s: string) => void, settings: ModelSettings) {
+  return tool({
+    description: "对当前源码进行增量编辑。支持 insert/replace/delete 三种操作，可一次执行多个。用于分步修改代码，避免一次性重写全部源码。",
+    inputSchema: editSourceInputSchema,
+    outputSchema: editSourceOutputSchema,
+    ...(shouldUseClientStrictToolSchema(settings) ? { strict: true } : {}),
+    execute: async (input) => {
+      const source = getSource();
+      const lines = source.split("\n");
+      let newLines = [...lines];
+      let operationsApplied = 0;
+      const sorted = [...input.operations].sort((a, b) => b.lineStart - a.lineStart);
+      for (const op of sorted) {
+        try {
+          if (op.type === "insert") {
+            const idx = Math.max(0, Math.min(op.lineStart - 1, newLines.length));
+            newLines.splice(idx, 0, ...(op.content ?? "").split("\n"));
+            operationsApplied++;
+          } else if (op.type === "replace") {
+            if (!op.lineEnd) return { accepted: false, error: "replace 操作需要 lineEnd 参数", operationsApplied, totalOperations: input.operations.length };
+            const s = Math.max(0, Math.min(op.lineStart - 1, newLines.length));
+            const e = Math.max(s, Math.min(op.lineEnd, newLines.length));
+            newLines.splice(s, e - s, ...(op.content ?? "").split("\n"));
+            operationsApplied++;
+          } else if (op.type === "delete") {
+            if (!op.lineEnd) return { accepted: false, error: "delete 操作需要 lineEnd 参数", operationsApplied, totalOperations: input.operations.length };
+            const s = Math.max(0, Math.min(op.lineStart - 1, newLines.length));
+            const e = Math.max(s, Math.min(op.lineEnd, newLines.length));
+            newLines.splice(s, e - s);
+            operationsApplied++;
+          }
+        } catch (err) {
+          return { accepted: false, error: `操作执行失败: ${err instanceof Error ? err.message : String(err)}`, operationsApplied, totalOperations: input.operations.length };
+        }
+      }
+      const newSource = newLines.join("\n");
+      if (newSource.length > 80_000) return { accepted: false, error: "编辑后源码超过 80KB 限制", operationsApplied, totalOperations: input.operations.length };
+      setSource(newSource);
+      return { accepted: true, newSource, operationsApplied, totalOperations: input.operations.length };
+    },
   });
 }
 
@@ -184,6 +291,22 @@ mc.build({ name: "名称", version: "${version}", author: "作者", description:
 4. 所有坐标值必须是整数，不能是浮点数
 5. 不要调用不存在的方法，只使用上述列出的 API
 
+
+
+## 增量编辑（推荐用于大型建筑）
+对于大型建筑，推荐使用增量编辑方式分步构建：
+1. 先用 commit_source 提交基础结构（如地基、主体框架）
+2. 使用 read_source 查看现有代码结构
+3. 使用 search_source 定位需要修改的代码位置
+4. 使用 edit_source 进行增量修改（如添加装饰、内部细节）
+5. 最终用 commit_source 提交完整版本进行验证
+
+增量编辑的优势：
+- 避免一次性生成大量代码导致的 token 限制问题
+- 可以逐步完善建筑细节
+- 更容易定位和修复错误
+- 支持迭代式开发
+
 完成后必须调用 commit_source 提交完整 JavaScript。工具在当前浏览器内执行 AST 安全预检、QuickJS 隔离执行和目标版本注册表校验。
 若 accepted=false 且 terminal 不为 true，必须读取准确错误、修复完整源码并再次提交；accepted=true 后停止调用工具并简要总结；terminal=true 后不得继续调用工具。
 不要输出私有思维链，只提供简洁、可核验的摘要和工具轨迹。
@@ -222,6 +345,17 @@ class ClientBuilderChatTransport implements ChatTransport<BuilderUIMessage> {
     }
 
     const commitSourceTool = createCommitSourceTool(settings);
+
+    // 创建增量编辑工具（维护当前源码状态）
+    let currentSource = source ?? "";
+    const readSourceTool = createReadSourceTool(() => currentSource, settings);
+    const searchSourceTool = createSearchSourceTool(() => currentSource, settings);
+    const editSourceTool = createEditSourceTool(
+      () => currentSource,
+      (newSource: string) => { currentSource = newSource; },
+      settings
+    );
+
     const previousCommit = latestCommitOutput(messages);
     const shouldFinalize = previousCommit?.accepted === true || previousCommit?.terminal === true;
     const requiredToolChoice = requiredClientToolChoice(settings);
@@ -230,7 +364,12 @@ class ClientBuilderChatTransport implements ChatTransport<BuilderUIMessage> {
       instructions: `${builderInstructions(version, source, settings)}\n${shouldFinalize
         ? "浏览器已返回终止性的 commit_source 结果。不得再次调用工具；准确总结验证成功或未收敛失败。"
         : "本轮必须以调用 commit_source 并提交完整候选源码结束。"}`,
-      tools: { commit_source: commitSourceTool },
+      tools: {
+        commit_source: commitSourceTool,
+        read_source: readSourceTool,
+        search_source: searchSourceTool,
+        edit_source: editSourceTool,
+      },
       toolChoice: shouldFinalize ? "none" : requiredToolChoice,
       temperature: settings.generation.topP === null ? settings.generation.temperature ?? undefined : undefined,
       topP: settings.generation.topP ?? undefined,
