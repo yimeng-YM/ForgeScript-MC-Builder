@@ -55,6 +55,34 @@ test("the 3D viewport owns and releases one WebGL renderer", async () => {
   assert.doesNotMatch(source, /PCFSoftShadowMap/);
 });
 
+test("first-person preview requests pointer lock from the user gesture and suspends orbit controls", async () => {
+  const viewport = await readFile(
+    path.join(process.cwd(), "components", "builder", "viewport-3d.tsx"),
+    "utf8",
+  );
+  const workbench = await readFile(
+    path.join(process.cwd(), "components", "builder", "workbench.tsx"),
+    "utf8",
+  );
+
+  assert.match(workbench, /viewportControllerRef\.current\?\.requestFirstPerson\(\)/);
+  assert.match(workbench, /onSelect=\{selectBlock\}/);
+  assert.doesNotMatch(workbench, /aria-label="第一人称移动速度"/);
+  assert.match(viewport, /new PointerLockControls\(camera, renderer\.domElement\)/);
+  assert.match(viewport, /if \(runtime\.firstPersonUpdate\) runtime\.firstPersonUpdate\(deltaSeconds\)/);
+  assert.doesNotMatch(viewport, /requestAnimationFrame\(tick\)/);
+  assert.match(viewport, /if \(!locked\) onFirstPersonChangeRef\.current\(false\)/);
+  assert.match(viewport, /raycaster\.ray\.origin\.copy\(runtime\.renderedCameraPosition\)/);
+  assert.match(viewport, /applyQuaternion\(runtime\.renderedCameraQuaternion\)/);
+  assert.match(viewport, /pointerControls\.moveForward\(forward \* distance\)/);
+  assert.match(viewport, /pointerControls\.moveRight\(right \* distance\)/);
+  assert.match(viewport, /renderedCameraQuaternion/);
+  assert.match(viewport, /canvas\.addEventListener\("wheel", onWheel/);
+  assert.match(viewport, /first-person-speed-notice/);
+  assert.doesNotMatch(viewport, /if \(document\.pointerLockElement === renderer\.domElement\) return/);
+  assert.doesNotMatch(viewport, /requestAnimationFrame\(\(\) => \{\s*canvas\.requestPointerLock\(\)/);
+});
+
 test("keeps every AI operation in the browser client", async () => {
   const workbench = await readFile(new URL("../components/builder/workbench.tsx", import.meta.url), "utf8");
   const dialog = await readFile(new URL("../components/builder/model-settings-dialog.tsx", import.meta.url), "utf8");

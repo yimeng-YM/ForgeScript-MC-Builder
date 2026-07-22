@@ -10,6 +10,7 @@ export const providerKindSchema = z.enum([
 
 export const authModeSchema = z.enum(["bearer", "api-key", "x-api-key", "none"]);
 export const detailLevelSchema = z.enum(["concept", "balanced", "engineering"]);
+export const knowledgeModuleModeSchema = z.enum(["auto", "on", "off"]);
 export const reasoningEffortSchema = z.enum(["off", "low", "medium", "high"]);
 
 export const DEFAULT_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -54,6 +55,7 @@ export const modelSettingsSchema = z.object({
     maxBuildBlocks: z.number().int().min(1_000).max(500_000),
     executionTimeoutMs: z.number().int().min(1_000).max(MAX_SCRIPT_TIMEOUT_MS),
     extraInstructions: z.string().max(4_000),
+    redstoneCircuitModule: knowledgeModuleModeSchema,
   }),
 });
 
@@ -272,6 +274,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
     maxBuildBlocks: 200_000,
     executionTimeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
     extraInstructions: "",
+    redstoneCircuitModule: "auto",
   },
 };
 

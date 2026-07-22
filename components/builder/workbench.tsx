@@ -14,6 +14,7 @@ import {
   Code2,
   Cuboid,
   Download,
+  Upload,
   Eye,
   EyeOff,
   FileCode2,
@@ -35,6 +36,7 @@ import {
   X,
   WandSparkles,
   Zap,
+  Crosshair,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import {
@@ -49,6 +51,7 @@ import {
 } from "@/components/ai-elements/message";
 import { Tool, ToolContent, ToolHeader } from "@/components/ai-elements/tool";
 import dynamic from "next/dynamic";
+import type { Viewport3DController } from "./viewport-3d";
 const Viewport3D = dynamic(
   () => import("./viewport-3d").then((mod) => mod.Viewport3D),
   { ssr: false }
@@ -75,6 +78,7 @@ import { clientBuilderTransport } from "@/lib/ai/client-chat";
 import { preflightBuilderSource } from "@/lib/ai/source-preflight";
 import { DEFAULT_SOURCE, emptySource } from "@/lib/minecraft/demo-source";
 import { createLitematicBlob, safeLitematicName } from "@/lib/minecraft/litematic";
+import { litematicToJs } from "@/lib/minecraft/litematic-to-js";
 import { executeBuilderSource } from "@/lib/minecraft/runner";
 import {
   listResourcePacks,
@@ -229,6 +233,8 @@ export function BuilderWorkbench() {
   const [xray, setXray] = useState(false);
   const [redstoneOnly, setRedstoneOnly] = useState(false);
   const [layer, setLayer] = useState<number | null>(null);
+  const [firstPerson, setFirstPerson] = useState(false);
+  const [firstPersonSpeed, setFirstPersonSpeed] = useState(5);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [resourcePackOpen, setResourcePackOpen] = useState(false);
@@ -257,6 +263,7 @@ export function BuilderWorkbench() {
   const sourceSnapshotsRef = useRef<Record<string, { source: string; version: string }>>({});
   const workspaceRevisionRef = useRef(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const viewportControllerRef = useRef<Viewport3DController>(null);
 
   const stats = useMemo(() => getWorldStats(world), [world]);
   const maxY = useMemo(
@@ -375,6 +382,33 @@ export function BuilderWorkbench() {
       cancelled = true;
     };
   }, [version]);
+
+  // Exit first-person mode on Escape
+  useEffect(() => {
+    if (!firstPerson) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFirstPerson(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [firstPerson]);
+
+  const toggleFirstPerson = () => {
+    if (firstPerson) {
+      setFirstPerson(false);
+      return;
+    }
+    if (!viewportControllerRef.current?.requestFirstPerson()) {
+      setNotice("当前浏览器无法启动第一人称指针锁定");
+      return;
+    }
+    setFirstPerson(true);
+  };
+
+  const selectBlock = (block: PlacedBlock | null) => {
+    setSelected(block);
+    if (block) setInspectorOpen(true);
+  };
 
   const {
     messages,
@@ -768,6 +802,7 @@ export function BuilderWorkbench() {
     setXray(false);
     setRedstoneOnly(false);
     setLayer(null);
+    setFirstPerson(false);
     setAgentRun({ id: null, status: "idle", attempt: 0, maxAttempts: 1 });
     setAttemptedSource(null);
     if (imageInputRef.current) imageInputRef.current.value = "";
@@ -796,6 +831,27 @@ export function BuilderWorkbench() {
       ? `资源包栈已更新 · ${enabledCount} 个资源包生效 · 顶部优先`
       : "资源包栈已清空 · 使用真实形状与程序化材质");
   }, []);
+
+  const litematicInputRef = useRef<HTMLInputElement>(null);
+
+  const handleLitematicImport = async (file: File) => {
+    console.log("[litematic] importing:", file.name, file.size, "bytes");
+    setNotice("正在解析 .litematic 文件...");
+    try {
+      const buffer = await file.arrayBuffer();
+      console.log("[litematic] got buffer:", buffer.byteLength, "bytes");
+      const js = await litematicToJs(new Uint8Array(buffer), file.name.replace(/\.litematic$/i, ""));
+      console.log("[litematic] generated", js.length, "chars of JS");
+      setSource(js);
+      if (pack) {
+        await runWith(js, pack);
+      }
+      setNotice(`已从 ${file.name} 导入并执行`);
+    } catch (error) {
+      console.error("[litematic] import failed:", error);
+      setNotice(`导入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
 
   const exportLitematic = async () => {
     if (!pack || blockingErrors > 0 || world.blocks.length === 0) return;
@@ -883,11 +939,27 @@ export function BuilderWorkbench() {
             {running ? <LoaderCircle size={15} className="spin" /> : <Play size={15} fill="currentColor" />}
             运行源码
           </button>
+          <button className="export-button" onClick={() => litematicInputRef.current?.click()}>
+            <Upload size={15} />
+            导入 .litematic
+          </button>
           <button className="export-button" disabled={!pack || blockingErrors > 0 || exporting || world.blocks.length === 0} onClick={() => void exportLitematic()}>
             {exporting ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
             导出 .litematic
           </button>
         </div>
+
+        <input
+          ref={litematicInputRef}
+          type="file"
+          accept=".litematic"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleLitematicImport(file);
+            e.target.value = "";
+          }}
+        />
       </header>
 
       <div className={`workbench-grid ${inspectorOpen ? "with-inspector" : ""}`}>
@@ -1136,6 +1208,7 @@ export function BuilderWorkbench() {
                 <button className={xray ? "active" : ""} onClick={() => setXray((value) => !value)} title="X-Ray">{xray ? <EyeOff size={14} /> : <Eye size={14} />}</button>
                 <button className={redstoneOnly ? "active redstone" : ""} onClick={() => setRedstoneOnly((value) => !value)} title="仅红石"><Zap size={14} /></button>
                 <button className={layer !== null ? "active" : ""} onClick={() => setLayer((value) => value === null ? maxY : null)} title="Y 层切片"><Layers3 size={14} /></button>
+                <button className={firstPerson ? "active fp" : ""} onClick={toggleFirstPerson} title="第一人称预览"><Crosshair size={14} /></button>
               </>}
               <button className={inspectorOpen ? "active" : ""} onClick={() => setInspectorOpen((value) => !value)} title="检查器"><PanelRight size={14} /></button>
             </div>
@@ -1149,15 +1222,21 @@ export function BuilderWorkbench() {
                   xray={xray}
                   redstoneOnly={redstoneOnly}
                   layer={layer}
+                  firstPerson={firstPerson}
+                  firstPersonSpeed={firstPersonSpeed}
+                  controllerRef={viewportControllerRef}
                   selected={selected}
                   versionPack={pack}
                   resourcePacks={resourcePacks}
-                  onSelect={setSelected}
+                  onSelect={selectBlock}
+                  onFirstPersonChange={setFirstPerson}
+                  onFirstPersonSpeedChange={setFirstPersonSpeed}
                 />
                 <div className="preview-overlay top-left">
                   <span className="axis x">X</span><span className="axis y">Y</span><span className="axis z">Z</span>
                   <span>{stats.size.join(" × ")} blocks</span>
                 </div>
+                {firstPerson && <div className="first-person-crosshair" aria-hidden="true" />}
                 {layer !== null && (
                   <div className="layer-control">
                     <label>Y ≤ {layer}</label>

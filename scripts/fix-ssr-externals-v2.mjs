@@ -27,6 +27,7 @@ const ASSETS = resolve(SSR_ROOT, "assets");
 const STUB_PACKAGES = new Set([
   "three",
   "three/examples/jsm/controls/OrbitControls.js",
+  "three/examples/jsm/controls/PointerLockControls.js",
   "shiki",
   "shiki/core",
   "shiki/wasm",

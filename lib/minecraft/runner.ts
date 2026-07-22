@@ -175,6 +175,36 @@ const SDK_BOOTSTRAP = String.raw`
         mode,
         powered
       });
+    },
+    noteBlock(instrument, note) {
+      if (typeof instrument !== 'string') throw new TypeError('instrument must be a string');
+      var validInstruments = [
+        'harp','basedrum','snare','hat','bass','flute','bell','guitar',
+        'chime','xylophone','iron_xylophone','cow_bell','didgeridoo',
+        'bit','banjo','pling','zombie','skeleton','creeper','dragon',
+        'wither_skeleton','piglin','custom_head'
+      ];
+      if (!validInstruments.includes(instrument)) throw new TypeError('invalid instrument: ' + instrument);
+      var n = integer(note, 'note');
+      if (n < 0 || n > 24) throw new RangeError('note must be between 0 and 24');
+      return block('minecraft:note_block', {
+        instrument: instrument,
+        note: String(n),
+        powered: 'false'
+      });
+    },
+    delayChain(signalDirection, totalTicks) {
+      cardinal(signalDirection, 'signalDirection');
+      integer(totalTicks, 'totalTicks');
+      if (totalTicks < 1) throw new RangeError('totalTicks must be at least 1');
+      var result = [];
+      var remaining = totalTicks;
+      while (remaining > 0) {
+        var d = Math.min(remaining, 4);
+        result.push({ delay: d });
+        remaining -= d;
+      }
+      return result;
     }
   });
   const build = (nextMetadata, callback) => {

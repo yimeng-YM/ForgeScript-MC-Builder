@@ -897,6 +897,54 @@ textarea:focus-visible {
 }
 
 .layer-control input { accent-color: #26724e; }
+.first-person-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 2px;
+  pointer-events: none;
+  z-index: 10;
+}
+.first-person-crosshair::before,
+.first-person-crosshair::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 1px;
+}
+.first-person-crosshair::before {
+  width: 16px;
+  height: 2px;
+  top: 0;
+  left: -7px;
+}
+.first-person-crosshair::after {
+  width: 2px;
+  height: 16px;
+  top: -7px;
+  left: 0;
+}
+
+.first-person-speed-notice {
+  padding: 7px 10px;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  color: #435149;
+  border: 1px solid rgb(77 90 82 / 0.22);
+  border-radius: 7px;
+  background: rgb(248 246 240 / 0.88);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.08);
+  backdrop-filter: blur(8px);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.view-actions button.fp { color: #3d6b52; background: #d0ddd4; }
 
 .source-surface {
   display: flex;

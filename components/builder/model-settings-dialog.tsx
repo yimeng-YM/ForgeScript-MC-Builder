@@ -512,6 +512,21 @@ export function ModelSettingsDialog({ open, onOpenChange, profiles, activeProfil
                   <div className="settings-toggle-list">
                     <ToggleRow checked={draft.builder.strictBlockStates} title="严格方块状态" description="要求朝向、半砖位置、连接形态、充能状态等属性显式完整。" onChange={(strictBlockStates) => setDraft((current) => ({ ...current, builder: { ...current.builder, strictBlockStates } }))} />
                     <ToggleRow checked={draft.builder.redstonePrecision} title="红石工程模式" description="推导信号方向、延迟、准连接、更新顺序和容器状态。" onChange={(redstonePrecision) => setDraft((current) => ({ ...current, builder: { ...current.builder, redstonePrecision } }))} />
+                    <Field label="红石电路知识" hint="中继器、比较器、活塞、信号衰减。自动=根据对话关键词检测。">
+                      <select
+                        value={draft.builder.redstoneCircuitModule}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            builder: { ...current.builder, redstoneCircuitModule: event.target.value as "auto" | "on" | "off" },
+                          }))
+                        }
+                      >
+                        <option value="auto">自动检测</option>
+                        <option value="on">始终加载</option>
+                        <option value="off">不加载</option>
+                      </select>
+                    </Field>
                     <ToggleRow checked={draft.builder.preserveExisting} title="保留现有结构" description="后续对话只修改相关源码；关闭后允许整体重构。" onChange={(preserveExisting) => setDraft((current) => ({ ...current, builder: { ...current.builder, preserveExisting } }))} />
                     <ToggleRow checked={draft.builder.autoRunAfterGeneration} title="生成后自动运行" description="AI 提交源码后立即进入 QuickJS 沙箱、校验并刷新 3D 预览。" onChange={(autoRunAfterGeneration) => setDraft((current) => ({ ...current, builder: { ...current.builder, autoRunAfterGeneration } }))} />
                   </div>

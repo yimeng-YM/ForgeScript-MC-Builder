@@ -1,8 +1,9 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { loadCollisionShapePack, type CollisionShapePack } from "@/lib/minecraft/block-shapes";
 import { createPreviewMeshes } from "@/lib/minecraft/preview-mesher";
 import { loadRenderResources, type LoadedRenderResources } from "@/lib/minecraft/render-resources";
@@ -14,10 +15,19 @@ type Viewport3DProps = {
   xray: boolean;
   redstoneOnly: boolean;
   layer: number | null;
+  firstPerson: boolean;
+  firstPersonSpeed: number;
   selected: PlacedBlock | null;
   versionPack: VersionPack | null;
   resourcePacks: ResourcePackSummary[];
   onSelect: (block: PlacedBlock | null) => void;
+  onFirstPersonChange: (active: boolean) => void;
+  onFirstPersonSpeedChange: (speed: number) => void;
+  controllerRef: Ref<Viewport3DController>;
+};
+
+export type Viewport3DController = {
+  requestFirstPerson: () => boolean;
 };
 
 type ViewportRuntime = {
@@ -25,10 +35,15 @@ type ViewportRuntime = {
   camera: THREE.PerspectiveCamera;
   renderer: THREE.WebGLRenderer;
   controls: OrbitControls;
+  pointerControls: PointerLockControls;
   content: THREE.Group;
   selection: THREE.Group;
   meshes: THREE.Object3D[];
   framedWorld: WorldDocument | null;
+  bounds: THREE.Box3;
+  firstPersonUpdate: ((deltaSeconds: number) => void) | null;
+  renderedCameraPosition: THREE.Vector3;
+  renderedCameraQuaternion: THREE.Quaternion;
 };
 
 function disposeGroup(group: THREE.Group) {
@@ -55,14 +70,24 @@ export function Viewport3D({
   xray,
   redstoneOnly,
   layer,
+  firstPerson,
+  firstPersonSpeed,
   selected,
   versionPack,
   resourcePacks,
   onSelect,
+  onFirstPersonChange,
+  onFirstPersonSpeedChange,
+  controllerRef,
 }: Viewport3DProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ViewportRuntime | null>(null);
   const onSelectRef = useRef(onSelect);
+  const onFirstPersonChangeRef = useRef(onFirstPersonChange);
+  const firstPersonSpeedRef = useRef(firstPersonSpeed);
+  const onFirstPersonSpeedChangeRef = useRef(onFirstPersonSpeedChange);
+  const speedNoticeTimerRef = useRef<number | null>(null);
+  const [speedNotice, setSpeedNotice] = useState<number | null>(null);
   const [shapePack, setShapePack] = useState<CollisionShapePack | null>(null);
   const [renderResources, setRenderResources] = useState<LoadedRenderResources | null>(null);
   const [resourceState, setResourceState] = useState<{
@@ -73,6 +98,32 @@ export function Viewport3D({
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
+
+  useEffect(() => {
+    onFirstPersonChangeRef.current = onFirstPersonChange;
+  }, [onFirstPersonChange]);
+
+  useEffect(() => {
+    firstPersonSpeedRef.current = firstPersonSpeed;
+  }, [firstPersonSpeed]);
+
+  useEffect(() => {
+    onFirstPersonSpeedChangeRef.current = onFirstPersonSpeedChange;
+  }, [onFirstPersonSpeedChange]);
+
+  useImperativeHandle(controllerRef, () => ({
+    requestFirstPerson() {
+      const canvas = runtimeRef.current?.renderer.domElement;
+      if (!canvas || typeof canvas.requestPointerLock !== "function") return false;
+      try {
+        const request = canvas.requestPointerLock();
+        void Promise.resolve(request).catch(() => onFirstPersonChangeRef.current(false));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  }), []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -94,6 +145,8 @@ export function Viewport3D({
     controls.screenSpacePanning = true;
     controls.maxDistance = 1000;
     controls.minDistance = 3;
+    const pointerControls = new PointerLockControls(camera, renderer.domElement);
+    pointerControls.enabled = false;
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x6d716d, 2.2));
     const sun = new THREE.DirectionalLight(0xfff4dc, 2.5);
@@ -110,21 +163,39 @@ export function Viewport3D({
       camera,
       renderer,
       controls,
+      pointerControls,
       content,
       selection,
       meshes: [],
       framedWorld: null,
+      bounds: new THREE.Box3(),
+      firstPersonUpdate: null,
+      renderedCameraPosition: new THREE.Vector3(),
+      renderedCameraQuaternion: new THREE.Quaternion(),
     };
     runtimeRef.current = runtime;
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const handlePointer = (event: PointerEvent) => {
+      const pointerLocked = document.pointerLockElement === renderer.domElement;
       const rect = renderer.domElement.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
+      if (!pointerLocked) {
+        pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      }
+      if (pointerLocked) {
+        // Pick from the exact camera pose used by the last displayed frame.
+        raycaster.ray.origin.copy(runtime.renderedCameraPosition);
+        raycaster.ray.direction
+          .set(0, 0, -1)
+          .applyQuaternion(runtime.renderedCameraQuaternion)
+          .normalize();
+      } else {
+        camera.updateMatrixWorld();
+        raycaster.setFromCamera(pointer, camera);
+      }
       const hit = raycaster.intersectObjects(runtime.meshes, false)[0];
       if (!hit) {
         onSelectRef.current(null);
@@ -153,18 +224,26 @@ export function Viewport3D({
     resize();
 
     let frame = 0;
-    const animate = () => {
+    let previousTime = performance.now();
+    const animate = (time: number) => {
       frame = requestAnimationFrame(animate);
-      controls.update();
+      const deltaSeconds = Math.min(Math.max((time - previousTime) / 1000, 0), 0.1);
+      previousTime = time;
+      if (runtime.firstPersonUpdate) runtime.firstPersonUpdate(deltaSeconds);
+      else runtime.controls.update();
       renderer.render(scene, camera);
+      runtime.renderedCameraPosition.copy(camera.position);
+      runtime.renderedCameraQuaternion.copy(camera.quaternion);
     };
-    animate();
+    frame = requestAnimationFrame(animate);
 
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       renderer.domElement.removeEventListener("pointerdown", handlePointer);
-      controls.dispose();
+      runtime.controls.dispose();
+      runtime.pointerControls.dispose();
+      if (speedNoticeTimerRef.current !== null) window.clearTimeout(speedNoticeTimerRef.current);
       disposeGroup(content);
       disposeGroup(selection);
       renderer.renderLists.dispose();
@@ -243,6 +322,7 @@ export function Viewport3D({
       : visible;
     const bounds = new THREE.Box3();
     for (const block of sampled) bounds.expandByPoint(new THREE.Vector3(block.x, block.y, block.z));
+    runtime.bounds.copy(bounds);
     if (versionPack) {
       const result = createPreviewMeshes({
         blocks: sampled,
@@ -268,14 +348,14 @@ export function Viewport3D({
     axes.position.set(center.x - size.x / 2 - 1, grid.position.y + 0.02, center.z - size.z / 2 - 1);
     runtime.content.add(axes);
 
-    if (runtime.framedWorld !== world) {
+    if (runtime.framedWorld !== world && !firstPerson) {
       const radius = Math.max(8, size.length() * 0.8);
       runtime.camera.position.set(center.x + radius, center.y + radius * 0.72, center.z + radius);
       runtime.controls.target.copy(center);
       runtime.controls.update();
       runtime.framedWorld = world;
     }
-  }, [world, xray, redstoneOnly, layer, versionPack, shapePack, renderResources]);
+  }, [world, xray, redstoneOnly, layer, firstPerson, versionPack, shapePack, renderResources]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -290,9 +370,141 @@ export function Viewport3D({
     runtime.selection.add(lines);
   }, [selected]);
 
+  // First-person pointer-lock controls
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime || !firstPerson) return;
+
+    const { camera, renderer, scene, pointerControls } = runtime;
+    const canvas = renderer.domElement;
+    if (typeof canvas.requestPointerLock !== "function") {
+      queueMicrotask(() => onFirstPersonChangeRef.current(false));
+      return;
+    }
+
+    const orbitPosition = camera.position.clone();
+    const orbitTarget = runtime.controls.target.clone();
+    const bounds = runtime.bounds;
+    const startY = bounds.isEmpty() ? 1.62 : bounds.min.y + 1.62;
+    const startZ = bounds.isEmpty() ? orbitTarget.z - 6 : bounds.min.z - 3;
+    camera.position.set(orbitTarget.x, startY, startZ);
+    const lookTarget = new THREE.Vector3(orbitTarget.x, startY, orbitTarget.z);
+    camera.lookAt(lookTarget);
+    camera.updateMatrix();
+    camera.updateMatrixWorld();
+
+    // OrbitControls.update() overwrites the camera quaternion, so the render loop
+    // must skip it while pointer-lock controls own the camera.
+    runtime.controls.enabled = false;
+    pointerControls.enabled = true;
+
+    // Extended fog for first-person view
+    const originalFog = scene.fog;
+    scene.fog = new THREE.Fog(0xe8e5dc, 200, 1000);
+
+    // Pointer-lock state
+    let locked = document.pointerLockElement === canvas;
+    const onLockChange = () => {
+      locked = document.pointerLockElement === canvas;
+      if (!locked) onFirstPersonChangeRef.current(false);
+    };
+    const onLockError = () => onFirstPersonChangeRef.current(false);
+    document.addEventListener("pointerlockchange", onLockChange);
+    document.addEventListener("pointerlockerror", onLockError);
+
+    // Key tracking
+    const keys = new Set<string>();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!locked) return;
+      const tracked = [
+        "KeyW", "KeyA", "KeyS", "KeyD",
+        "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+        "Space", "ShiftLeft", "ShiftRight",
+      ];
+      if (tracked.includes(event.code)) {
+        event.preventDefault();
+        keys.add(event.code);
+      }
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      keys.delete(event.code);
+    };
+    const clearKeys = () => keys.clear();
+
+    const onWheel = (event: WheelEvent) => {
+      if (!locked || event.deltaY === 0) return;
+      event.preventDefault();
+      const nextSpeed = THREE.MathUtils.clamp(
+        firstPersonSpeedRef.current + (event.deltaY < 0 ? 1 : -1),
+        1,
+        20,
+      );
+      firstPersonSpeedRef.current = nextSpeed;
+      onFirstPersonSpeedChangeRef.current(nextSpeed);
+      setSpeedNotice(nextSpeed);
+      if (speedNoticeTimerRef.current !== null) window.clearTimeout(speedNoticeTimerRef.current);
+      speedNoticeTimerRef.current = window.setTimeout(() => {
+        speedNoticeTimerRef.current = null;
+        setSpeedNotice(null);
+      }, 1_000);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener("blur", clearKeys);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+
+    const updateFirstPerson = (deltaSeconds: number) => {
+      const forward = Number(keys.has("KeyW") || keys.has("ArrowUp"))
+        - Number(keys.has("KeyS") || keys.has("ArrowDown"));
+      const right = Number(keys.has("KeyD") || keys.has("ArrowRight"))
+        - Number(keys.has("KeyA") || keys.has("ArrowLeft"));
+      const vertical = Number(keys.has("Space"))
+        - Number(keys.has("ShiftLeft") || keys.has("ShiftRight"));
+      const magnitude = Math.hypot(forward, right, vertical);
+      if (magnitude === 0) return;
+      const distance = firstPersonSpeedRef.current * deltaSeconds / magnitude;
+      // PointerLockControls reads the camera's local axes from camera.matrix.
+      camera.updateMatrix();
+      pointerControls.moveForward(forward * distance);
+      pointerControls.moveRight(right * distance);
+      camera.position.y += vertical * distance;
+    };
+    runtime.firstPersonUpdate = updateFirstPerson;
+    updateFirstPerson(0);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener("blur", clearKeys);
+      canvas.removeEventListener("wheel", onWheel);
+      document.removeEventListener("pointerlockchange", onLockChange);
+      document.removeEventListener("pointerlockerror", onLockError);
+
+      if (document.pointerLockElement === canvas) {
+        document.exitPointerLock();
+      }
+
+      scene.fog = originalFog;
+      keys.clear();
+      pointerControls.enabled = false;
+      if (runtime.firstPersonUpdate === updateFirstPerson) runtime.firstPersonUpdate = null;
+
+      camera.position.copy(orbitPosition);
+      runtime.controls.target.copy(orbitTarget);
+      runtime.controls.enabled = true;
+      runtime.controls.update();
+    };
+  }, [firstPerson]);
+
   return (
     <div className="viewport-frame">
       <div className="viewport-host" ref={hostRef} aria-label="Minecraft 结构三维预览" />
+      {firstPerson && speedNotice !== null && (
+        <div className="first-person-speed-notice" role="status">移动速度 {speedNotice} 格/秒</div>
+      )}
       <div className={`render-resource-state ${resourceState.status}`} aria-live="polite">
         <span />
         {resourceState.message}

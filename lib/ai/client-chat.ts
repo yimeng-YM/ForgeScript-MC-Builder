@@ -30,6 +30,7 @@ import {
   shouldUseClientStrictToolSchema,
 } from "./client-provider.ts";
 import { sourceForPrompt } from "../minecraft/demo-source.ts";
+import { detectModules, buildKnowledgeModules } from "./prompt-modules.ts";
 
 const transportBodySchema = z.object({
   version: z.string().min(1).max(40).default("1.21.11"),
@@ -226,7 +227,7 @@ function detailInstruction(settings: ModelSettings) {
   return "按工程级精度生成，处理连接、转角、内部结构、功能状态与可施工性。";
 }
 
-function builderInstructions(version: string, source: string | undefined, settings: ModelSettings) {
+function builderInstructions(version: string, source: string | undefined, settings: ModelSettings, extraModules: string = "") {
   const stateRule = settings.builder.strictBlockStates
     ? "所有带状态方块必须显式写出该版本所需属性，不能依赖含糊默认值。"
     : "优先显式写出关键方块状态。";
@@ -283,6 +284,8 @@ mc.build({ name: "名称", version: "${version}", author: "作者", description:
 
 ### Java 红石语义
 中继器和比较器的 block-state facing 从输出指向输入，与信号传播方向相反；优先使用 redstone.repeater(signalDirection, options) 和 redstone.comparator(signalDirection, options)。
+
+${extraModules}
 
 ## 常见错误避免
 1. fill/hollowBox/walls/line 的 from 和 to 参数必须是 [x, y, z] 数组，不能传其他格式
@@ -361,7 +364,7 @@ class ClientBuilderChatTransport implements ChatTransport<BuilderUIMessage> {
     const requiredToolChoice = requiredClientToolChoice(settings);
     const agent = new ToolLoopAgent({
       model: resolved.model,
-      instructions: `${builderInstructions(version, source, settings)}\n${shouldFinalize
+      instructions: `${builderInstructions(version, source, settings, buildKnowledgeModules(detectModules(latestPrompt(messages), source, { redstoneCircuitModule: settings.builder.redstoneCircuitModule })))}\n${shouldFinalize
         ? "浏览器已返回终止性的 commit_source 结果。不得再次调用工具；准确总结验证成功或未收敛失败。"
         : "本轮必须以调用 commit_source 并提交完整候选源码结束。"}`,
       tools: {
