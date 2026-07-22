@@ -48,6 +48,22 @@ export function validateWorld(world: WorldDocument, pack: VersionPack): Diagnost
   const diagnostics: Diagnostic[] = [];
   const registry = new Map(pack.blocks.map((block) => [block.id, block]));
   const resolvedRedstone = resolveRedstoneConnections(world);
+  const versionParts = pack.gameVersion.split(".").map(Number);
+  const supportsMobHeadNoteBlockSounds =
+    versionParts[0] > 1 || (versionParts[0] === 1 && versionParts[1] >= 20);
+  const noteBlockSoundHeads = new Set([
+    "minecraft:zombie_head",
+    "minecraft:skeleton_skull",
+    "minecraft:creeper_head",
+    "minecraft:dragon_head",
+    "minecraft:wither_skeleton_skull",
+    "minecraft:piglin_head",
+    "minecraft:player_head",
+  ]);
+  const positionKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  const blocksByPosition = new Map(
+    world.blocks.map((block) => [positionKey(block.x, block.y, block.z), block]),
+  );
 
   for (const [blockIndex, placed] of world.blocks.entries()) {
     const schema = registry.get(placed.state.id);
@@ -123,6 +139,59 @@ export function validateWorld(world: WorldDocument, pack: VersionPack): Diagnost
           message: `Redstone wire connections do not match neighbors: ${mismatchedDirections.join(", ")}`,
           block: location,
           suggestion: "Run the structure through the Building SDK connection resolver before export.",
+        });
+      }
+    }
+
+    if (["minecraft:note_block", "minecraft:noteblock"].includes(placed.state.id)) {
+      const schemaPropertyNames = new Set(schema.properties.map((property) => property.name));
+      const requiredProperties = ["instrument", "note", "powered"].filter((name) =>
+        schemaPropertyNames.has(name),
+      );
+      const missingProperties = requiredProperties.filter(
+        (name) => placed.state.properties[name] === undefined,
+      );
+      if (missingProperties.length > 0) {
+        diagnostics.push({
+          severity: "error",
+          stage: "block-state",
+          code: "INCOMPLETE_NOTE_BLOCK_STATE",
+          message: `Note block is missing explicit ${missingProperties.join(", ")} state`,
+          block: location,
+          suggestion: "Use redstone.noteBlock(instrument, note) so the Litematic palette stores the instrument explicitly.",
+        });
+      }
+
+      const above = blocksByPosition.get(positionKey(placed.x, placed.y + 1, placed.z));
+      const isPlayableHead =
+        supportsMobHeadNoteBlockSounds && above && noteBlockSoundHeads.has(above.state.id);
+      if (above && !isPlayableHead) {
+        diagnostics.push({
+          severity: "warning",
+          stage: "redstone",
+          code: "NOTE_BLOCK_MUTED_BY_ABOVE_BLOCK",
+          message: `Note block is muted because ${above.state.id} occupies the block directly above it`,
+          block: location,
+          suggestion: "This is valid for an intentionally silent note block; otherwise keep the block directly above it as minecraft:air.",
+        });
+      }
+
+      const adjacentWire = [
+        [placed.x, placed.y, placed.z - 1],
+        [placed.x + 1, placed.y, placed.z],
+        [placed.x, placed.y, placed.z + 1],
+        [placed.x - 1, placed.y, placed.z],
+      ].some(([x, y, z]) =>
+        blocksByPosition.get(positionKey(x, y, z))?.state.id === "minecraft:redstone_wire",
+      );
+      if (adjacentWire) {
+        diagnostics.push({
+          severity: "warning",
+          stage: "redstone",
+          code: "NOTE_BLOCK_DIRECT_REDSTONE_WIRE",
+          message: "Redstone wire directly adjacent to a note block can make timing and channel isolation fragile",
+          block: location,
+          suggestion: "Prefer a correctly oriented repeater output or another directional pulse to activate the note block from the side.",
         });
       }
     }

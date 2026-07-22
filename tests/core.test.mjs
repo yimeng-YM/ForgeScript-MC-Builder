@@ -19,6 +19,11 @@ import {
   shouldUseClientStrictToolSchema as shouldUseStrictToolSchema,
 } from "../lib/ai/client-provider.ts";
 import { preflightBuilderSource } from "../lib/ai/source-preflight.ts";
+import {
+  REDSTONE_MUSIC_MODULE,
+  buildKnowledgeModules,
+  detectModules,
+} from "../lib/ai/prompt-modules.ts";
 import { DEFAULT_SOURCE, emptySource, sourceForPrompt } from "../lib/minecraft/demo-source.ts";
 import { createLitematicBlob } from "../lib/minecraft/litematic.ts";
 import { redstoneSignalDirection } from "../lib/minecraft/redstone.ts";
@@ -28,6 +33,66 @@ import { validateWorld } from "../lib/minecraft/versions.ts";
 const pack = JSON.parse(
   await readFile(new URL("../public/version-packs/1.21.11.json", import.meta.url), "utf8"),
 );
+
+test("loads strict note-block construction rules for redstone music prompts", () => {
+  const modules = detectModules("请创建一段红石音乐", "", {
+    redstoneCircuitModule: "auto",
+  });
+  assert.deepEqual(modules, ["block-states", "redstone-music"]);
+
+  const prompt = buildKnowledgeModules(modules);
+  assert.match(prompt, /需要演奏普通音符的音符盒，上方一格必须是 minecraft:air/);
+  assert.match(prompt, /允许用普通方块或红石部件遮挡上方/);
+  assert.match(prompt, /源码注释中标记“故意静音”/);
+  assert.match(prompt, /尽量不要用红石粉直接贴着音符盒激活/);
+  assert.match(prompt, /redstone\.noteBlock\(instrument, note\)/);
+  assert.match(prompt, /投影所需音色来自调色板 NBT 中的 instrument 状态/);
+  assert.match(prompt, /redstone\.repeater\(signalDirection, \{ delay \}\)/);
+  assert.match(prompt, /四分音符=600\/x rt/);
+  assert.match(prompt, /redstone\.delayChain\(signalDirection, totalTicks\)/);
+  assert.match(prompt, /不要逐段独立四舍五入/);
+  assert.match(prompt, /同一时刻的音符是和弦/);
+  assert.match(prompt, /琶音是把和弦音按时间先后逐个触发/);
+  assert.match(prompt, /chordStart\+i×stepRt/);
+  assert.match(prompt, /2\.5 rt 使用 2、3、2、3/);
+  assert.match(prompt, /交替放置“中继器→音符盒→中继器→音符盒”/);
+  assert.match(prompt, /不能改变用户给定的低音线或旋律最高音/);
+  assert.match(prompt, /合法生物头颅音色允许对应头颅在上方/);
+  assert.match(prompt, /同一个音符盒再次演奏前必须先断电/);
+  assert.equal(prompt.includes(REDSTONE_MUSIC_MODULE), true);
+});
+
+test("rejects implicit note-block states but permits intentional muting with a warning", async () => {
+  const source = `mc.build({ name: "note-block-validation", version: "1.21.11" }, ({ world, block, redstone }) => {
+    const region = world.region("music");
+    region.set([0, 0, 0], block("minecraft:note_block", { note: "12", powered: "false" }));
+    region.set([0, 1, 0], block("minecraft:stone"));
+    region.set([1, 0, 0], redstone.wire(0));
+  });`;
+  const world = await executeBuilderSource(source);
+  const diagnostics = validateWorld(world, pack);
+
+  assert.ok(diagnostics.some((item) => item.code === "INCOMPLETE_NOTE_BLOCK_STATE"));
+  const mutedDiagnostic = diagnostics.find((item) => item.code === "NOTE_BLOCK_MUTED_BY_ABOVE_BLOCK");
+  assert.equal(mutedDiagnostic?.severity, "warning");
+  assert.match(mutedDiagnostic?.suggestion ?? "", /valid for an intentionally silent note block/);
+  assert.ok(diagnostics.some((item) => item.code === "NOTE_BLOCK_DIRECT_REDSTONE_WIRE"));
+});
+
+test("does not treat a Java 1.20+ mob-head instrument as a muted note block", async () => {
+  const source = `mc.build({ name: "mob-head-note", version: "1.21.11" }, ({ world, block, redstone }) => {
+    const region = world.region("music");
+    region.set([0, 0, 0], redstone.noteBlock("zombie", 0));
+    region.set([0, 1, 0], block("minecraft:zombie_head", { rotation: "0" }));
+  });`;
+  const world = await executeBuilderSource(source);
+  const diagnostics = validateWorld(world, pack);
+
+  assert.equal(
+    diagnostics.some((item) => item.code === "NOTE_BLOCK_MUTED_BY_ABOVE_BLOCK"),
+    false,
+  );
+});
 
 test("ships validated model provider presets and safe generation defaults", () => {
   assert.ok(PROVIDER_PRESETS.length >= 12);
